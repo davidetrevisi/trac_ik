@@ -34,25 +34,32 @@ TRAC-IK:
 ```c++
 #include <trac_ik/trac_ik.hpp>
 
-TRAC_IK::TRAC_IK ik_solver(KDL::Chain chain, KDL::JntArray lower_joint_limits, KDL::JntArray upper_joint_limits, double timeout_in_secs=0.005, double error=1e-5, TRAC_IK::SolveType type=TRAC_IK::Speed);  
+TRAC_IK::TRAC_IK ik_solver(KDL::Chain chain, KDL::JntArray lower_joint_limits, KDL::JntArray upper_joint_limits, rclcpp::Logger logger=rclcpp::get_logger("trac_ik.trac_ik_lib"));  
 
-% OR
+% NOTE: the constructor describes the mechanism and nothing else, so one
+% solver can answer many queries. Build the chain yourself with kdl_parser;
+% there is no longer a constructor that reads a URDF parameter.
 
-TRAC_IK::TRAC_IK ik_solver(string base_link, string tip_link, string URDF_param="/robot_description", double timeout_in_secs=0.005, double error=1e-5, TRAC_IK::SolveType type=TRAC_IK::Speed);  
+TRAC_IK::Query query;                        % everything that may differ between calls
+query.timeout = 0.005;                       % seconds
+query.epsilon = 1e-5;
+query.solve_type = TRAC_IK::Speed;
+query.tolerance_bounds = KDL::Twist::Zero(); % per-axis tolerances in the goal frame
+% query.q_min, query.q_max                   % joint bounds for this call; empty = the mechanism's own
+% query.stall_window                         % how long the search may go without improving, as a fraction of the timeout
 
-% NOTE: The last arguments to the constructors are optional.
-% The type can be one of the following: 
+% The solve type can be one of the following: 
 % Speed: returns very quickly the first solution found
 % Distance: runs for the full timeout_in_secs, then returns the solution that minimizes SSE from the seed
 % Manip1: runs for full timeout, returns solution that maximizes sqrt(det(J*J^T)) (the product of the singular values of the Jacobian)
 % Manip2: runs for full timeout, returns solution that minimizes the ratio of min to max singular values of the Jacobian.
 % Manip3: runs for full timeout, returns solution that maximizes the smallest singular value of the Jacobian.
 
-int rc = ik_solver.CartToJnt(KDL::JntArray joint_seed, KDL::Frame desired_end_effector_pose, KDL::JntArray& return_joints, KDL::Twist tolerances);
+int rc = ik_solver.CartToJnt(KDL::JntArray joint_seed, KDL::Frame desired_end_effector_pose, KDL::JntArray& return_joints, TRAC_IK::Query query);
 
 % NOTE: CartToJnt succeeded if rc >=0	
 
-% NOTE: tolerances on the end effector pose are optional, and if not
+% NOTE: the query is optional, and its tolerances default to 0. If not
 % provided, then by default are 0.  If given, the ABS() of the
 % values will be used to set tolerances at -tol..0..+tol for each of
 % the 6 Cartesian dimensions of the end effector pose.

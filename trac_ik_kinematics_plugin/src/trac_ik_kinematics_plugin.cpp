@@ -343,41 +343,43 @@ bool TRAC_IKKinematicsPlugin::searchPositionIK(const geometry_msgs::msg::Pose &i
   for (uint z = 0; z < num_joints_; z++)
     in(z) = ik_seed_state[z];
 
-  KDL::Twist bounds = KDL::Twist::Zero();
+  TRAC_IK::Query query;
+  query.epsilon = params_->epsilon;
 
   if (position_ik_)
   {
-    bounds.rot.x(std::numeric_limits<float>::max());
-    bounds.rot.y(std::numeric_limits<float>::max());
-    bounds.rot.z(std::numeric_limits<float>::max());
+    query.tolerance_bounds.rot.x(std::numeric_limits<float>::max());
+    query.tolerance_bounds.rot.y(std::numeric_limits<float>::max());
+    query.tolerance_bounds.rot.z(std::numeric_limits<float>::max());
   }
 
-  TRAC_IK::SolveType solvetype;
-
   if (solve_type == "Manipulation1")
-    solvetype = TRAC_IK::Manip1;
+    query.solve_type = TRAC_IK::Manip1;
   else if (solve_type == "Manipulation2")
-    solvetype = TRAC_IK::Manip2;
+    query.solve_type = TRAC_IK::Manip2;
   else if (solve_type == "Manipulation3")
-      solvetype = TRAC_IK::Manip3;
+    query.solve_type = TRAC_IK::Manip3;
   else if (solve_type == "Distance")
-    solvetype = TRAC_IK::Distance;
+    query.solve_type = TRAC_IK::Distance;
   else
   {
     if (solve_type != "Speed")
     {
       RCLCPP_WARN_STREAM(LOGGER, solve_type << " is not a valid solve_type; setting to default: Speed");
     }
-    solvetype = TRAC_IK::Speed;
+    query.solve_type = TRAC_IK::Speed;
   }
+
+  // One solver for the whole call: the mechanism does not change between retries, only the budget
+  // left to spend on the next one, and that rides on the query.
+  TRAC_IK::TRAC_IK ik_solver(chain, joint_min, joint_max, node_->get_logger());
 
   auto end_time = std::chrono::system_clock::now() + std::chrono::duration<double>(timeout);
   while (std::chrono::system_clock::now() < end_time)
   {
-    double solver_timeout = std::chrono::duration<double>(end_time - std::chrono::system_clock::now()).count();
-    TRAC_IK::TRAC_IK ik_solver(node_, chain, joint_min, joint_max, solver_timeout, params_->epsilon, solvetype);
+    query.timeout = std::chrono::duration<double>(end_time - std::chrono::system_clock::now()).count();
 
-    int rc = ik_solver.CartToJnt(in, frame, out, bounds);
+    int rc = ik_solver.CartToJnt(in, frame, out, query);
 
     // If you want to retrieve all the returned solutions, the (commented) code below does it
     // Note that you have to call getSolutions() AFTER a successful code to CartToJnt to get all the solutions generated
