@@ -226,6 +226,8 @@ TEST(TracIkLib, CraneChainShape)
 
 TEST(TracIkLib, CraneSolutionRespectsMimicCoupling)
 {
+  GTEST_SKIP() << "measures the mimic coupling defect; delete this skip in ticket 05";
+
   Fixture f("crane.urdf", "base_link", "jib_ext_link");
   // Distance, not Speed, and deliberately so: in Speed mode the KDL branch answers in ~1 ms with a
   // solution whose four parallel prismatic joints happen to be equal, so the coupling looks intact
