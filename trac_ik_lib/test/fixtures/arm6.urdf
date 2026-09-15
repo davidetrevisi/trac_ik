@@ -1,5 +1,5 @@
 <?xml version="1.0"?>
-<!-- PROTOTYPE FIXTURE (wayfinder ticket 02). A conventional 6-DOF arm: no mimic joints, a mix of
+<!-- FIXTURE (wayfinder ticket 02). A conventional 6-DOF arm: no mimic joints, a mix of
      continuous and limited revolute joints, box geometry only. Exists so the suite is honest about
      regressions the crane (5 active DOF, position-only) cannot show. Not a model of any real robot. -->
 <robot name="arm6">

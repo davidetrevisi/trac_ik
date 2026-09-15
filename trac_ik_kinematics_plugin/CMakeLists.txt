@@ -79,7 +79,11 @@ ament_export_dependencies(
   trac_ik_lib
   urdf)
 
-# --- PROTOTYPE TEST HARNESS (wayfinder ticket 02); throwaway, not production wiring ---
+# Tests (wayfinder ticket 02): the plugin seam, KinematicsBase, judged by robot-state forward
+# kinematics. Under BUILD_TESTING so the existing industrial_ci `colcon test` picks the target up
+# with no workflow change; every CI cell runs it and gates on it. Fixtures are found through the
+# TRAC_IK_TEST_FIXTURE_DIR compile definition rather than a hard-coded path or ament_index: one less
+# install step, and --symlink-install keeps edits live.
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(srdfdom REQUIRED)

@@ -84,7 +84,11 @@ install(
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(rclcpp geometry_msgs urdf kdl_parser orocos_kdl_vendor orocos_kdl NLopt)
 
-# --- PROTOTYPE TEST HARNESS (wayfinder ticket 02); throwaway, not production wiring ---
+# Tests (wayfinder ticket 02): the library seam, TRAC_IK::CartToJnt, judged by KDL forward
+# kinematics. Under BUILD_TESTING so the existing industrial_ci `colcon test` picks the target up
+# with no workflow change; every CI cell runs it and gates on it. Fixtures are found through the
+# TRAC_IK_TEST_FIXTURE_DIR compile definition rather than a hard-coded path or ament_index: one less
+# install step, and --symlink-install keeps edits live.
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_trac_ik test/test_trac_ik.cpp TIMEOUT 300)

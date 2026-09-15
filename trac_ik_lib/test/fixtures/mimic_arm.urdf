@@ -1,0 +1,60 @@
+<?xml version="1.0"?>
+<!-- FIXTURE (wayfinder tickets 02, 05). The commonest mimic robot on earth: a small revolute arm
+     with one mimic joint at a NEGATIVE multiplier and a NONZERO offset. The crane covers only
+     "prismatic, x1, +0", arm6 and arm7 cover no couplings at all, so neither can catch a sign error
+     in the bound mapping or in the folded Jacobian.
+
+     j1 (yaw), j2 (pitch) and j4 (pitch) are active; j3 mimics j2 with multiplier -0.5 and offset
+     0.3, and sits downstream of it. j3's own limits [-0.2, 0.8] are deliberately TIGHTER than the
+     interval j2's limits [-1.5, 1.5] would induce ([-0.45, 1.05]), so the sign-aware bound mapping
+     bites: j2's effective range is [-1.0, 1.0], not its declared one.
+
+     Three active joints against a three-dimensional position goal, so position-only queries stay
+     solvable once the coupling is enforced. Box geometry only, not a model of any real robot. -->
+<robot name="mimic_arm">
+  <link name="base_link">
+    <inertial><mass value="1.0"/><inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial>
+    <visual><geometry><box size="0.2 0.2 0.1"/></geometry></visual>
+  </link>
+
+  <link name="shoulder_link">
+    <inertial><mass value="1.0"/><inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial>
+    <visual><geometry><box size="0.1 0.1 0.1"/></geometry></visual>
+  </link>
+  <joint name="j1" type="revolute">
+    <parent link="base_link"/><child link="shoulder_link"/>
+    <origin xyz="0 0 0.1" rpy="0 0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-2.8" upper="2.8" effort="100" velocity="2.0"/>
+  </joint>
+
+  <link name="upper_arm_link">
+    <inertial><mass value="1.0"/><inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial>
+    <visual><geometry><box size="0.1 0.1 0.4"/></geometry></visual>
+  </link>
+  <joint name="j2" type="revolute">
+    <parent link="shoulder_link"/><child link="upper_arm_link"/>
+    <origin xyz="0 0 0.1" rpy="0 0 0"/><axis xyz="0 1 0"/>
+    <limit lower="-1.5" upper="1.5" effort="100" velocity="2.0"/>
+  </joint>
+
+  <link name="forearm_link">
+    <inertial><mass value="1.0"/><inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial>
+    <visual><geometry><box size="0.1 0.1 0.3"/></geometry></visual>
+  </link>
+  <joint name="j3" type="revolute">
+    <parent link="upper_arm_link"/><child link="forearm_link"/>
+    <origin xyz="0 0 0.4" rpy="0 0 0"/><axis xyz="0 1 0"/>
+    <limit lower="-0.2" upper="0.8" effort="100" velocity="2.0"/>
+    <mimic joint="j2" multiplier="-0.5" offset="0.3"/>
+  </joint>
+
+  <link name="tool_link">
+    <inertial><mass value="0.2"/><inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/></inertial>
+    <visual><geometry><box size="0.05 0.05 0.05"/></geometry></visual>
+  </link>
+  <joint name="j4" type="revolute">
+    <parent link="forearm_link"/><child link="tool_link"/>
+    <origin xyz="0 0 0.3" rpy="0 0 0"/><axis xyz="0 1 0"/>
+    <limit lower="-2.0" upper="2.0" effort="50" velocity="2.0"/>
+  </joint>
+</robot>

@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<!-- FIXTURE (wayfinder tickets 02, 05). Companion SRDF for mimic_arm.urdf. The group names every
+     chain joint with variables, the mimic joint j3 included: MoveIt requires that, and omitting one
+     corrupts memory in release builds (research/moveit2-mimic-contract.md 1). -->
+<robot name="mimic_arm">
+  <group name="arm">
+    <chain base_link="base_link" tip_link="tool_link"/>
+  </group>
+  <group_state name="home" group="arm">
+    <joint name="j1" value="0"/><joint name="j2" value="0"/><joint name="j4" value="0"/>
+  </group_state>
+  <passive_joint name="j3"/>
+</robot>

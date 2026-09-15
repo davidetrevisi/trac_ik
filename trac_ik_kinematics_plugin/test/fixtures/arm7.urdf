@@ -1,5 +1,5 @@
 <?xml version="1.0"?>
-<!-- PROTOTYPE FIXTURE (wayfinder ticket 22). A redundant 7R arm: one genuine degree of self-motion
+<!-- FIXTURE (wayfinder ticket 22). A redundant 7R arm: one genuine degree of self-motion
      against a full-pose goal, so the 6x7 Jacobian has a one-dimensional null space everywhere away
      from singularities. Exists because every solver decision in the map was measured on the crane
      (rank-deficient, 5 active DOF) or arm6 (square 6x6) and TRAC-IK's own audience is redundant

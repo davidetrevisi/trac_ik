@@ -1,5 +1,5 @@
 <?xml version="1.0"?>
-<!-- PROTOTYPE FIXTURE (wayfinder ticket 02). Companion SRDF for arm6.urdf. -->
+<!-- FIXTURE (wayfinder ticket 02). Companion SRDF for arm6.urdf. -->
 <robot name="arm6">
   <group name="arm">
     <chain base_link="base_link" tip_link="tool_link"/>
