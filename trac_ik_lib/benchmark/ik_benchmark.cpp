@@ -287,18 +287,10 @@ struct Mechanism
 // the query
 // ---------------------------------------------------------------------------------------------
 
-struct Query
-{
-  double timeout = 0.05;
-  double epsilon = 1e-5;
-  TRAC_IK::SolveType solve_type = TRAC_IK::Speed;
-  double tol[6] = { 0, 0, 0, 0, 0, 0 };  // x, y, z, rx, ry, rz - in the goal frame (ticket 09)
-
-  KDL::Twist bounds() const
-  {
-    return KDL::Twist(KDL::Vector(tol[0], tol[1], tol[2]), KDL::Vector(tol[3], tol[4], tol[5]));
-  }
-};
+// The library's own query value (ticket 03): timeout, epsilon, solve type and the six tolerance
+// bounds, indexed x, y, z, rx, ry, rz in the goal frame. Its timeout default is the library's
+// 0.005 s; this tool defaults to MoveIt's 0.05 s instead, set where the query is built.
+using Query = TRAC_IK::Query;
 
 struct Sample
 {
@@ -331,7 +323,7 @@ void verify(const Mechanism& m, const Query& q, const Sample& s, const KDL::JntA
   o.joint_dist = m.jointDistance(s.seed, sol);
   bool ok = true;
   for (int i = 0; i < 6; ++i)
-    ok = ok && std::fabs(e(i)) <= std::max(q.tol[i], q.epsilon);
+    ok = ok && std::fabs(e(i)) <= std::max(q.tolerance_bounds(i), q.epsilon);
   o.solved = ok;
   o.realisable = ok && o.coupling <= q.epsilon;
 }
@@ -370,8 +362,8 @@ std::vector<Outcome> run(Solver which, const Mechanism& m, const Query& q,
   KDL::ChainIkSolverVel_pinv vik(m.chain);
   KDL::ChainIkSolverPos_NR_JL nr_jl(m.chain, m.lb, m.ub, fk, vik, kNrJlMaxIter, q.epsilon);
   KDL::ChainIkSolverPos_TL kdl_tl(m.chain, m.lb, m.ub, q.timeout, q.epsilon, true, true);
-  NLOPT_IK::NLOPT_IK nlopt(m.chain, m.lb, m.ub, q.timeout, q.epsilon, NLOPT_IK::SumSq, logger);
-  TRAC_IK::TRAC_IK trac_ik(m.chain, m.lb, m.ub, q.timeout, q.epsilon, q.solve_type, logger);
+  NLOPT_IK::NLOPT_IK nlopt(m.chain, m.lb, m.ub, q.timeout, q.epsilon, logger);
+  TRAC_IK::TRAC_IK trac_ik(m.chain, m.lb, m.ub, logger);
 
   std::vector<Outcome> out;
   out.reserve(samples.size());
@@ -383,9 +375,9 @@ std::vector<Outcome> run(Solver which, const Mechanism& m, const Query& q,
     switch (which)
     {
       case Solver::KdlNrJl: o.rc = nr_jl.CartToJnt(s.seed, s.target, sol); break;
-      case Solver::KdlTl: o.rc = kdl_tl.CartToJnt(s.seed, s.target, sol, q.bounds()); break;
-      case Solver::Nlopt: o.rc = nlopt.CartToJnt(s.seed, s.target, sol, q.bounds()); break;
-      case Solver::TracIk: o.rc = trac_ik.CartToJnt(s.seed, s.target, sol, q.bounds()); break;
+      case Solver::KdlTl: o.rc = kdl_tl.CartToJnt(s.seed, s.target, sol, q.tolerance_bounds); break;
+      case Solver::Nlopt: o.rc = nlopt.CartToJnt(s.seed, s.target, sol, q.tolerance_bounds); break;
+      case Solver::TracIk: o.rc = trac_ik.CartToJnt(s.seed, s.target, sol, q); break;
     }
     o.us = std::chrono::duration<double, std::micro>(Clock::now() - t0).count();
     if (o.rc >= 0)
@@ -415,8 +407,8 @@ void reportHeader(const Mechanism& m, const Query& q, const std::string& base, c
   std::printf("\n");
   std::printf("  query         timeout %.4f s, epsilon %.1e, solve type %s\n", q.timeout, q.epsilon,
               type_names[static_cast<int>(q.solve_type)]);
-  std::printf("  tolerances    [%g %g %g %g %g %g] (goal frame)\n", q.tol[0], q.tol[1], q.tol[2], q.tol[3],
-              q.tol[4], q.tol[5]);
+  std::printf("  tolerances    [%g %g %g %g %g %g] (goal frame)\n", q.tolerance_bounds(0), q.tolerance_bounds(1),
+              q.tolerance_bounds(2), q.tolerance_bounds(3), q.tolerance_bounds(4), q.tolerance_bounds(5));
   std::printf("  rng seed      %u (sample set), %u (solver stream, derived)\n", rng_seed, solver_seed);
   std::printf("\n  %-14s %7s %8s  %10s %10s %10s %10s   %9s %9s %9s %9s\n", "solver", "solved",
               "realisab", "median us", "mean us", "p90 us", "p95 us", "pos m", "rot rad", "coupling",
@@ -475,19 +467,19 @@ void runMicro(const Mechanism& m, const Query& q, int reps)
   {
     {
       const auto t0 = Clock::now();
-      TRAC_IK::TRAC_IK ik(m.chain, m.lb, m.ub, q.timeout, q.epsilon, q.solve_type, logger);
+      TRAC_IK::TRAC_IK ik(m.chain, m.lb, m.ub, logger);
       whole.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
     }
     {
       const auto t0 = Clock::now();
       {
-        TRAC_IK::TRAC_IK ik(m.chain, m.lb, m.ub, q.timeout, q.epsilon, q.solve_type, logger);
+        TRAC_IK::TRAC_IK ik(m.chain, m.lb, m.ub, logger);
       }
       whole_dtor.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
     }
     {
       const auto t0 = Clock::now();
-      NLOPT_IK::NLOPT_IK n(m.chain, m.lb, m.ub, q.timeout, q.epsilon, NLOPT_IK::SumSq, logger);
+      NLOPT_IK::NLOPT_IK n(m.chain, m.lb, m.ub, q.timeout, q.epsilon, logger);
       nlo.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
     }
     {
@@ -594,6 +586,7 @@ int main(int argc, char** argv)
   unsigned int rng_seed = 1;
   double near_radius = 0.05;
   Query query;
+  query.timeout = 0.05;  // MoveIt's kinematics_solver_timeout, not the library's 0.005 s default
   bool tol_given = false, full_pose = false;
 
   for (int i = 1; i < argc; ++i)
@@ -626,8 +619,7 @@ int main(int argc, char** argv)
     else if (a == "--full-pose") full_pose = true;
     else if (a == "--position-only")
     {
-      query.tol[0] = query.tol[1] = query.tol[2] = 0;
-      query.tol[3] = query.tol[4] = query.tol[5] = kInf;
+      query.tolerance_bounds = KDL::Twist(KDL::Vector::Zero(), KDL::Vector(kInf, kInf, kInf));
       tol_given = true;
     }
     else if (a == "--tolerances")
@@ -639,7 +631,7 @@ int main(int argc, char** argv)
         return 2;
       }
       for (int k = 0; k < 6; ++k)
-        query.tol[k] = parseTol(parts[k]);
+        query.tolerance_bounds(k) = parseTol(parts[k]);
       tol_given = true;
     }
     else if (a == "--solve-type")
@@ -713,7 +705,7 @@ int main(int argc, char** argv)
     Query q = query;
     if (!tol_given && !full_pose && spec.position_only)
     {
-      q.tol[3] = q.tol[4] = q.tol[5] = kInf;  // ticket 09: the crane's shipped configuration
+      q.tolerance_bounds.rot = KDL::Vector(kInf, kInf, kInf);  // ticket 09: the crane's shipped configuration
     }
 
     // One sample set, shared by every solver. The solver stream is derived from the same seed so a run

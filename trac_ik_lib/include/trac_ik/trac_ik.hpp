@@ -44,13 +44,46 @@ namespace TRAC_IK
 
 enum SolveType { Speed, Distance, Manip1, Manip2, Manip3 };
 
+/**
+ * Everything that may differ between one call to CartToJnt and the next.
+ *
+ * The constructor describes the mechanism -- the chain and the joint bounds it was built with --
+ * and a Query describes one question asked of it, so a single solver instance serves many queries
+ * and nothing about a call is hidden in solver state.
+ */
+struct Query
+{
+  /// Wall-clock budget for the whole solve, in seconds.
+  double timeout = 0.005;
+
+  /// Residual floor: the solve is accepted once the pose error is within it on every axis.
+  double epsilon = 1e-5;
+
+  /// Which solution the search returns, and therefore how long it keeps looking.
+  SolveType solve_type = Speed;
+
+  /// Per-axis tolerance bounds in the goal frame: vel is x, y, z and rot is rx, ry, rz. An axis
+  /// whose error falls inside its bound counts as met. An infinite bound frees the axis outright; a
+  /// finite one is still aimed at and only judged leniently; zero, the default, asks for the axis to
+  /// be met to within epsilon.
+  KDL::Twist tolerance_bounds = KDL::Twist::Zero();
+
+  /// Joint bounds for this call alone. Empty -- the default -- means the mechanism's own, the pair
+  /// the constructor was given. A non-empty pair must have one entry per chain joint. A rotational
+  /// joint counts as continuous for the call exactly when the bounds in force for it are infinite,
+  /// so narrowing a continuous joint genuinely bounds it for that call and nothing else.
+  KDL::JntArray q_min, q_max;
+
+  /// How long the search may go without improving before it gives up, as a fraction of timeout.
+  /// Carried here so the stall exit has a per-call home; no solver reads it yet (ticket 12).
+  double stall_window = 0.25;
+};
+
 class TRAC_IK
 {
 public:
-  TRAC_IK(rclcpp::Node::SharedPtr _nh, const KDL::Chain& _chain, const KDL::JntArray& _q_min, const KDL::JntArray& _q_max, double _maxtime = 0.005, double _eps = 1e-5, SolveType _type = Speed);
-  TRAC_IK(const KDL::Chain& _chain, const KDL::JntArray& _q_min, const KDL::JntArray& _q_max, double _maxtime = 0.005, double _eps = 1e-5, SolveType _type = Speed, const rclcpp::Logger& logger = rclcpp::get_logger("trac_ik.trac_ik_lib"));
-
-  TRAC_IK(rclcpp::Node::SharedPtr _nh, const std::string& _base_link, const std::string& _tip_link, const std::string& _URDF_param = "robot_description", double _maxtime = 0.005, double _eps = 1e-5, SolveType _type = Speed);
+  TRAC_IK(const KDL::Chain& _chain, const KDL::JntArray& _q_min, const KDL::JntArray& _q_max,
+          const rclcpp::Logger& _logger = rclcpp::get_logger("trac_ik.trac_ik_lib"));
 
   ~TRAC_IK();
 
@@ -74,18 +107,18 @@ public:
     return initialized && !solutions.empty();
   }
 
+  /**
+   * The candidates the last call collected, with the key each was ranked by.
+   *
+   * Each pair is (ordering key, index into solutions_). The key is NOT a distance in general: under
+   * Speed and Distance it is the squared joint distance from the seed and smaller is better, while
+   * under the Manip solve types it is a manipulability score and larger is better. Both orderings
+   * put the returned solution first, which is the only thing a caller can rely on across types.
+   */
   bool getSolutions(std::vector<KDL::JntArray>& solutions_, std::vector<std::pair<double, uint> >& errors_)
   {
     errors_ = errors;
     return getSolutions(solutions_);
-  }
-
-  bool setKDLLimits(KDL::JntArray& lb_, KDL::JntArray& ub_)
-  {
-    lb = lb_;
-    ub = ub_;
-    resetSolvers();
-    return true;
   }
 
   static double JointErr(const KDL::JntArray& arr1, const KDL::JntArray& arr2)
@@ -99,22 +132,18 @@ public:
     return err;
   }
 
-  int CartToJnt(const KDL::JntArray &q_init, const KDL::Frame &p_in, KDL::JntArray &q_out, const KDL::Twist& bounds = KDL::Twist::Zero());
-
-  inline void SetSolveType(SolveType _type)
-  {
-    solvetype = _type;
-  }
+  int CartToJnt(const KDL::JntArray &q_init, const KDL::Frame &p_in, KDL::JntArray &q_out, const Query& query = Query());
 
 private:
   rclcpp::Logger logger;
   bool initialized;
   KDL::Chain chain;
+  /// The mechanism's own joint bounds, from the constructor.
   KDL::JntArray lb, ub;
+  /// The bounds the inner solvers currently hold, so a query that does not change them costs no
+  /// rebuild.
+  KDL::JntArray solver_lb, solver_ub;
   std::unique_ptr<KDL::ChainJntToJacSolver> jacsolver;
-  double eps;
-  double maxtime;
-  SolveType solvetype;
 
   std::unique_ptr<NLOPT_IK::NLOPT_IK> nl_solver;
   std::unique_ptr<KDL::ChainIkSolverPos_TL> iksolver;
@@ -122,17 +151,27 @@ private:
   rclcpp::Clock system_clock;
   rclcpp::Time start_time;
 
+  // These take a RESOLVED query: one whose joint bounds are filled in, never the empty pair that
+  // means "the mechanism's own". CartToJnt resolves it once, on entry.
   template<typename T1, typename T2>
   bool runSolver(T1& solver, T2& other_solver,
+                 const Query& query,
                  const KDL::JntArray &q_init,
                  const KDL::Frame &p_in);
 
-  bool runKDL(const KDL::JntArray &q_init, const KDL::Frame &p_in);
-  bool runNLOPT(const KDL::JntArray &q_init, const KDL::Frame &p_in);
+  bool runKDL(const Query& query, const KDL::JntArray &q_init, const KDL::Frame &p_in);
+  bool runNLOPT(const Query& query, const KDL::JntArray &q_init, const KDL::Frame &p_in);
 
-  void normalize_seed(const KDL::JntArray& seed, KDL::JntArray& solution);
-  void normalize_limits(const KDL::JntArray& seed, KDL::JntArray& solution);
+  void normalize_seed(const KDL::JntArray& seed, KDL::JntArray& solution,
+                      const KDL::JntArray& q_min, const KDL::JntArray& q_max);
+  void normalize_limits(const KDL::JntArray& seed, KDL::JntArray& solution,
+                        const KDL::JntArray& q_min, const KDL::JntArray& q_max);
 
+  /// Rotational or translational, from the chain's segments. Fixed by the mechanism.
+  std::vector<KDL::BasicJointType> kinds;
+  /// The classification in force for the current solve: kinds, with each rotational joint called
+  /// continuous or not according to the bounds this solve runs under. Written before the two
+  /// threads start and only read while they run.
   std::vector<KDL::BasicJointType> types;
 
   std::mutex mtx_;
@@ -140,7 +179,6 @@ private:
   std::vector<std::pair<double, uint> >  errors;
 
   std::thread task1, task2;
-  KDL::Twist bounds;
 
   bool unique_solution(const KDL::JntArray& sol);
 
@@ -155,7 +193,7 @@ private:
   Ming-June, Tsia, PhD Thesis, Ohio State University, 1986.
   https://etd.ohiolink.edu/!etd.send_file?accession=osu1260297835
   */
-  double manipPenalty(const KDL::JntArray& arr);
+  double manipPenalty(const KDL::JntArray& arr, const KDL::JntArray& q_min, const KDL::JntArray& q_max);
   double manipValue1(const KDL::JntArray& arr);
   double manipValue2(const KDL::JntArray& arr);
   double manipValue3(const KDL::JntArray& arr);
@@ -169,22 +207,23 @@ private:
 
   void initialize();
 
-  void resetSolvers()
-  {
-    nl_solver.reset(new NLOPT_IK::NLOPT_IK(chain, lb, ub, maxtime, eps, NLOPT_IK::SumSq, logger));
-    iksolver.reset(new KDL::ChainIkSolverPos_TL(chain, lb, ub, maxtime, eps, true, true));
-  }
+  /// Decide, for these bounds, which rotational joints are continuous. The test is the one both
+  /// inner solvers apply to the bounds they are built with, so all three agree on every joint.
+  void classifyJoints(const KDL::JntArray& q_min, const KDL::JntArray& q_max);
 
+  /// Point the inner solvers at a resolved query's joint bounds and epsilon, rebuilding them only
+  /// when the bounds actually changed.
+  void configureSolvers(const Query& query);
 };
 
-inline bool TRAC_IK::runKDL(const KDL::JntArray &q_init, const KDL::Frame &p_in)
+inline bool TRAC_IK::runKDL(const Query& query, const KDL::JntArray &q_init, const KDL::Frame &p_in)
 {
-  return runSolver(*iksolver.get(), *nl_solver.get(), q_init, p_in);
+  return runSolver(*iksolver.get(), *nl_solver.get(), query, q_init, p_in);
 }
 
-inline bool TRAC_IK::runNLOPT(const KDL::JntArray &q_init, const KDL::Frame &p_in)
+inline bool TRAC_IK::runNLOPT(const Query& query, const KDL::JntArray &q_init, const KDL::Frame &p_in)
 {
-  return runSolver(*nl_solver.get(), *iksolver.get(), q_init, p_in);
+  return runSolver(*nl_solver.get(), *iksolver.get(), query, q_init, p_in);
 }
 
 }

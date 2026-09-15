@@ -68,6 +68,18 @@ double solveBudget()
   return budget;
 }
 
+// This suite's query: the budget and epsilon every test solves with. Timeout, epsilon, solve type
+// and the tolerance bounds live on the query rather than on the solver, so one instance answers
+// every sample in a test.
+TRAC_IK::Query defaultQuery(TRAC_IK::SolveType type = TRAC_IK::Speed)
+{
+  TRAC_IK::Query q;
+  q.timeout = solveBudget();
+  q.epsilon = kEps;
+  q.solve_type = type;
+  return q;
+}
+
 std::string readFixture(const std::string& name)
 {
   std::ifstream in(std::string(TRAC_IK_TEST_FIXTURE_DIR) + "/" + name);
@@ -257,7 +269,8 @@ void expectMimicCouplings(const Fixture& f, const KDL::JntArray& q)
 TEST(TracIkLib, Arm6FullPoseRoundTrip)
 {
   Fixture f("arm6.urdf", "base_link", "tool_link");
-  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, solveBudget(), kEps, TRAC_IK::Speed);
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub);
+  TRAC_IK::Query q = defaultQuery();
 
   std::mt19937 rng(1);  // test-side determinism: the TARGETS repeat, the solver's search does not
   int solved = 0;
@@ -265,7 +278,7 @@ TEST(TracIkLib, Arm6FullPoseRoundTrip)
   {
     const KDL::Frame target = f.fk(f.randomConfig(rng));
     KDL::JntArray seed = f.randomConfig(rng), sol;
-    if (ik.CartToJnt(seed, target, sol) < 0)
+    if (ik.CartToJnt(seed, target, sol, q) < 0)
       continue;
     ++solved;
     expectWithinLimits(f, sol);
@@ -280,13 +293,13 @@ TEST(TracIkLib, Arm6FullPoseRoundTrip)
 TEST(TracIkLib, Arm6PositionOnlyToleranceFreesOrientation)
 {
   Fixture f("arm6.urdf", "base_link", "tool_link");
-  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, solveBudget(), kEps, TRAC_IK::Speed);
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub);
+  TRAC_IK::Query q = defaultQuery();
 
   // Infinite rotational tolerance bounds: the three orientation components are free.
-  KDL::Twist bounds = KDL::Twist::Zero();
-  bounds.rot.x(std::numeric_limits<float>::max());
-  bounds.rot.y(std::numeric_limits<float>::max());
-  bounds.rot.z(std::numeric_limits<float>::max());
+  q.tolerance_bounds.rot.x(std::numeric_limits<float>::max());
+  q.tolerance_bounds.rot.y(std::numeric_limits<float>::max());
+  q.tolerance_bounds.rot.z(std::numeric_limits<float>::max());
 
   std::mt19937 rng(2);
   int solved = 0;
@@ -294,7 +307,7 @@ TEST(TracIkLib, Arm6PositionOnlyToleranceFreesOrientation)
   {
     const KDL::Frame target = f.fk(f.randomConfig(rng));
     KDL::JntArray seed = f.randomConfig(rng), sol;
-    if (ik.CartToJnt(seed, target, sol, bounds) < 0)
+    if (ik.CartToJnt(seed, target, sol, q) < 0)
       continue;
     ++solved;
     expectWithinLimits(f, sol);
@@ -309,7 +322,7 @@ TEST(TracIkLib, Arm6ContinuousJointsAreUnbounded)
 {
   Fixture f("arm6.urdf", "base_link", "tool_link");
   KDL::JntArray lb, ub;
-  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, solveBudget(), kEps, TRAC_IK::Speed);
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub);
   ASSERT_TRUE(ik.getKDLLimits(lb, ub));
   for (unsigned int i = 0; i < f.joint_names.size(); ++i)
   {
@@ -348,7 +361,8 @@ TEST(TracIkLib, CraneSolutionRespectsMimicCoupling)
   // (up to 0.86 on main_boom_ext_4, measured). Crane coupling tests therefore pin Distance rather
   // than leaning on the shipped default, and no mimic work may accept a green Speed-mode run as
   // evidence.
-  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, solveBudget(), kEps, TRAC_IK::Distance);
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub);
+  TRAC_IK::Query q = defaultQuery(TRAC_IK::Distance);
 
   // A mimic-consistent full configuration, so the target is reachable under the coupling.
   std::mt19937 rng(3);
@@ -359,12 +373,99 @@ TEST(TracIkLib, CraneSolutionRespectsMimicCoupling)
   // step moves them by equal amounts and the mimic violation stays invisible, exactly as in Speed
   // mode. An asymmetric seed is what exposes it.
   KDL::JntArray seed = f.randomConfig(rng), sol;
-  ASSERT_GE(ik.CartToJnt(seed, target, sol), 0) << "no solution for a reachable crane pose";
+  ASSERT_GE(ik.CartToJnt(seed, target, sol, q), 0) << "no solution for a reachable crane pose";
   EXPECT_LT(positionError(target, f.fk(sol)), kPosTol) << "the 9 free joints do reach the target";
   expectWithinLimits(f, sol);
 
   // RED until ticket 04: the solver chooses all 9 joints independently, so the coupling is broken.
   expectMimicCouplings(f, sol);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The query (ticket 03). Timeout, epsilon, solve type, tolerance bounds and the per-call joint
+// bounds are a parameter of CartToJnt, not solver state, so one instance answers many questions.
+// ---------------------------------------------------------------------------------------------
+
+// A query whose joint bounds are strictly inside the mechanism's: the middle half of every bounded
+// joint's range, and [-1, 1] rad for the continuous ones, which have no range to halve. Continuous
+// joints are narrowed on purpose -- a rotational joint is continuous for a call exactly when the
+// bounds in force are infinite, so a finite pair here must bound it like any other joint.
+TRAC_IK::Query narrowedQuery(const Fixture& f, TRAC_IK::SolveType type = TRAC_IK::Speed)
+{
+  TRAC_IK::Query q = defaultQuery(type);
+  q.q_min.resize(f.chain.getNrOfJoints());
+  q.q_max.resize(f.chain.getNrOfJoints());
+  for (unsigned int i = 0; i < f.chain.getNrOfJoints(); ++i)
+  {
+    const double quarter = f.unbounded(i) ? 0.0 : (f.ub(i) - f.lb(i)) / 4.0;
+    q.q_min(i) = f.unbounded(i) ? -1.0 : f.lb(i) + quarter;
+    q.q_max(i) = f.unbounded(i) ? 1.0 : f.ub(i) - quarter;
+  }
+  return q;
+}
+
+TEST(TracIkLib, QueryJointBoundsNarrowTheSearchWithoutChangingTheMechanism)
+{
+  Fixture f("arm6.urdf", "base_link", "tool_link");
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub);
+  const TRAC_IK::Query q = narrowedQuery(f);
+
+  // Targets are taken from configurations inside the narrowed box, so they stay reachable under it.
+  std::mt19937 rng(21);
+  int solved = 0;
+  for (int n = 0; n < 40; ++n)
+  {
+    KDL::JntArray inside(f.chain.getNrOfJoints());
+    for (unsigned int i = 0; i < f.chain.getNrOfJoints(); ++i)
+      inside(i) = std::uniform_real_distribution<double>(q.q_min(i), q.q_max(i))(rng);
+    const KDL::Frame target = f.fk(inside);
+    // Seeded from OUTSIDE the box on purpose: a seed inside it would leave the first Newton step
+    // inside whether or not the query's bounds were honoured, and the test would pass for nothing.
+    KDL::JntArray seed = f.randomConfig(rng), sol;
+    if (ik.CartToJnt(seed, target, sol, q) < 0)
+      continue;
+    ++solved;
+    for (unsigned int i = 0; i < f.chain.getNrOfJoints(); ++i)
+    {
+      EXPECT_GE(sol(i), q.q_min(i) - kEps) << "joint " << f.joint_names[i] << " below the query's bound";
+      EXPECT_LE(sol(i), q.q_max(i) + kEps) << "joint " << f.joint_names[i] << " above the query's bound";
+    }
+  }
+  EXPECT_GT(solved, 0) << "the narrowed box must still admit solutions";
+
+  // The mechanism is untouched: getKDLLimits still answers with what the constructor was given.
+  KDL::JntArray lb, ub;
+  ASSERT_TRUE(ik.getKDLLimits(lb, ub));
+  for (unsigned int i = 0; i < f.chain.getNrOfJoints(); ++i)
+  {
+    EXPECT_DOUBLE_EQ(lb(i), f.lb(i));
+    EXPECT_DOUBLE_EQ(ub(i), f.ub(i));
+  }
+}
+
+TEST(TracIkLib, OneInstanceAnswersQueriesThatDisagree)
+{
+  Fixture f("arm6.urdf", "base_link", "tool_link");
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub);
+
+  std::mt19937 rng(22);
+  const KDL::JntArray goal = f.randomConfig(rng);
+  const KDL::Frame target = f.fk(goal);
+  KDL::JntArray seed = f.randomConfig(rng);
+
+  // Three queries in a row on one instance, each changing something the constructor used to own:
+  // the solve type, the joint bounds (which rebuild the inner solvers and reclassify the continuous
+  // joints), and then back again. Every one must be answered on its own terms -- nothing may
+  // survive from the query before it.
+  for (const TRAC_IK::Query& q : { defaultQuery(), narrowedQuery(f, TRAC_IK::Distance), defaultQuery(TRAC_IK::Distance) })
+  {
+    KDL::JntArray sol;
+    if (ik.CartToJnt(seed, target, sol, q) < 0)
+      continue;  // a single sample may legitimately fail; a wrong answer may not
+    EXPECT_LT(positionError(target, f.fk(sol)), kPosTol);
+    EXPECT_LT(rotationError(target, f.fk(sol)), kRotTol);
+    expectWithinLimits(f, sol);
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -377,7 +478,8 @@ TEST(TracIkLib, Arm7FullPoseRoundTrip)
 {
   Fixture f("arm7.urdf", "base_link", "tool_link");
   ASSERT_EQ(f.chain.getNrOfJoints(), 7u);
-  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, solveBudget(), kEps, TRAC_IK::Speed);
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub);
+  TRAC_IK::Query q = defaultQuery();
 
   std::mt19937 rng(7);
   int solved = 0;
@@ -385,7 +487,7 @@ TEST(TracIkLib, Arm7FullPoseRoundTrip)
   {
     const KDL::Frame target = f.fk(f.randomConfig(rng));
     KDL::JntArray seed = f.randomConfig(rng), sol;
-    if (ik.CartToJnt(seed, target, sol) < 0)
+    if (ik.CartToJnt(seed, target, sol, q) < 0)
       continue;
     ++solved;
     expectWithinLimits(f, sol);
@@ -400,12 +502,12 @@ TEST(TracIkLib, Arm7FullPoseRoundTrip)
 TEST(TracIkLib, Arm7PositionOnlyToleranceFreesOrientation)
 {
   Fixture f("arm7.urdf", "base_link", "tool_link");
-  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, solveBudget(), kEps, TRAC_IK::Speed);
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub);
+  TRAC_IK::Query q = defaultQuery();
 
-  KDL::Twist bounds = KDL::Twist::Zero();
-  bounds.rot.x(std::numeric_limits<float>::max());
-  bounds.rot.y(std::numeric_limits<float>::max());
-  bounds.rot.z(std::numeric_limits<float>::max());
+  q.tolerance_bounds.rot.x(std::numeric_limits<float>::max());
+  q.tolerance_bounds.rot.y(std::numeric_limits<float>::max());
+  q.tolerance_bounds.rot.z(std::numeric_limits<float>::max());
 
   std::mt19937 rng(8);
   int solved = 0;
@@ -413,7 +515,7 @@ TEST(TracIkLib, Arm7PositionOnlyToleranceFreesOrientation)
   {
     const KDL::Frame target = f.fk(f.randomConfig(rng));
     KDL::JntArray seed = f.randomConfig(rng), sol;
-    if (ik.CartToJnt(seed, target, sol, bounds) < 0)
+    if (ik.CartToJnt(seed, target, sol, q) < 0)
       continue;
     ++solved;
     expectWithinLimits(f, sol);
@@ -430,7 +532,8 @@ TEST(TracIkLib, Arm7PositionOnlyToleranceFreesOrientation)
 TEST(TracIkLib, Arm7HasANullSpaceOfSolutions)
 {
   Fixture f("arm7.urdf", "base_link", "tool_link");
-  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, solveBudget(), kEps, TRAC_IK::Speed);
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub);
+  TRAC_IK::Query q = defaultQuery();
 
   std::mt19937 rng(9);
   const KDL::Frame target = f.fk(f.randomConfig(rng));
@@ -439,7 +542,7 @@ TEST(TracIkLib, Arm7HasANullSpaceOfSolutions)
   for (int n = 0; n < 20; ++n)
   {
     KDL::JntArray seed = f.randomConfig(rng), sol;
-    if (ik.CartToJnt(seed, target, sol) < 0)
+    if (ik.CartToJnt(seed, target, sol, q) < 0)
       continue;
     ASSERT_LT(positionError(target, f.fk(sol)), kPosTol);
     ASSERT_LT(rotationError(target, f.fk(sol)), kRotTol);
@@ -493,14 +596,14 @@ TEST(TracIkLib, MimicArmChainShape)
 TEST(TracIkLib, MimicArmPositionOnlyRoundTrip)
 {
   Fixture f("mimic_arm.urdf", "base_link", "tool_link");
-  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, solveBudget(), kEps, TRAC_IK::Speed);
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub);
+  TRAC_IK::Query q = defaultQuery();
 
   // Three active joints against a three-dimensional position goal: orientation is left free, so the
   // query stays solvable once the coupling is enforced and the solver has 3 variables, not 4.
-  KDL::Twist bounds = KDL::Twist::Zero();
-  bounds.rot.x(std::numeric_limits<float>::max());
-  bounds.rot.y(std::numeric_limits<float>::max());
-  bounds.rot.z(std::numeric_limits<float>::max());
+  q.tolerance_bounds.rot.x(std::numeric_limits<float>::max());
+  q.tolerance_bounds.rot.y(std::numeric_limits<float>::max());
+  q.tolerance_bounds.rot.z(std::numeric_limits<float>::max());
 
   std::mt19937 rng(11);
   int solved = 0;
@@ -508,7 +611,7 @@ TEST(TracIkLib, MimicArmPositionOnlyRoundTrip)
   {
     const KDL::Frame target = f.fk(f.mimicConsistentConfig(rng));
     KDL::JntArray seed = f.randomConfig(rng), sol;
-    if (ik.CartToJnt(seed, target, sol, bounds) < 0)
+    if (ik.CartToJnt(seed, target, sol, q) < 0)
       continue;
     ++solved;
     expectWithinLimits(f, sol);

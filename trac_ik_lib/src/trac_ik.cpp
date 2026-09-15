@@ -32,126 +32,62 @@ OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <trac_ik/trac_ik.hpp>
 #include <Eigen/Geometry>
 #include <rclcpp/rclcpp.hpp>
+#include <algorithm>
 #include <limits>
-#include <kdl_parser/kdl_parser.hpp>
-// Jazzy's urdf 2.10.1 has no <urdf/model.hpp>; on Kilted and Rolling <urdf/model.h> is a shim that
-// warns. Delete this guard, keeping the .hpp, when Jazzy reaches EOL (May 2029) -- or sooner, with
-// the code it serves: only files that parse a URDF file keep it, and the URDF-reading code here is
-// deleted by the tickets that take couplings and joint limits from MoveIt's robot model.
-#if __has_include(<urdf/model.hpp>)
-#include <urdf/model.hpp>
-#else
-#include <urdf/model.h>
-#endif
 
 namespace TRAC_IK
 {
 
-TRAC_IK::TRAC_IK(rclcpp::Node::SharedPtr _nh, const std::string& _base_link, const std::string& _tip_link, const std::string& _URDF_param, double _maxtime, double _eps, SolveType _type) :
-  logger(_nh->get_logger()),
-  initialized(false),
-  eps(_eps),
-  maxtime(_maxtime),
-  solvetype(_type)
+namespace
 {
-
-  urdf::Model robot_model;
-  std::string xml_string;
-
-  if(!_nh->has_parameter(_URDF_param))
-    xml_string = _nh->declare_parameter(_URDF_param, std::string(""));
-  else
-    _nh->get_parameter(_URDF_param, xml_string);
-
-  if(xml_string.empty())
-  {
-    RCLCPP_FATAL(_nh->get_logger(), "Could not load the xml from parameter: %s", _URDF_param.c_str());
-    return;
-  }
-
-  if (!robot_model.initString(xml_string))
-  {
-    RCLCPP_FATAL(logger, "Unable to initialize urdf::Model from robot description.");
-    return;
-  }
-
-  RCLCPP_DEBUG(logger, "Reading joints and links from URDF");
-
-  KDL::Tree tree;
-
-  if (!kdl_parser::treeFromUrdfModel(robot_model, tree))
-    RCLCPP_FATAL(logger, "Failed to extract kdl tree from xml robot description");
-
-  if (!tree.getChain(_base_link, _tip_link, chain))
-    RCLCPP_FATAL(logger, "Couldn't find chain %s to %s", _base_link.c_str(), _tip_link.c_str());
-
-  std::vector<KDL::Segment> chain_segs = chain.segments;
-
-  urdf::JointConstSharedPtr joint;
-
-  std::vector<double> l_bounds, u_bounds;
-
-  lb.resize(chain.getNrOfJoints());
-  ub.resize(chain.getNrOfJoints());
-
-  uint joint_num = 0;
-  for (unsigned int i = 0; i < chain_segs.size(); ++i)
-  {
-    joint = robot_model.getJoint(chain_segs[i].getJoint().getName());
-    if (joint->type != urdf::Joint::UNKNOWN && joint->type != urdf::Joint::FIXED)
-    {
-      joint_num++;
-      float lower, upper;
-      int hasLimits;
-      if (joint->type != urdf::Joint::CONTINUOUS)
-      {
-        if (joint->safety)
-        {
-          lower = std::max(joint->limits->lower, joint->safety->soft_lower_limit);
-          upper = std::min(joint->limits->upper, joint->safety->soft_upper_limit);
-        }
-        else
-        {
-          lower = joint->limits->lower;
-          upper = joint->limits->upper;
-        }
-        hasLimits = 1;
-      }
-      else
-      {
-        hasLimits = 0;
-      }
-      if (hasLimits)
-      {
-        lb(joint_num - 1) = lower;
-        ub(joint_num - 1) = upper;
-      }
-      else
-      {
-        lb(joint_num - 1) = std::numeric_limits<float>::lowest();
-        ub(joint_num - 1) = std::numeric_limits<float>::max();
-      }
-      RCLCPP_DEBUG_STREAM(logger, "IK Using joint " << joint->name << " " << lb(joint_num - 1) << " " << ub(joint_num - 1));
-    }
-  }
-
-  initialize();
+// Same size and the same value in every entry: the only question configureSolvers has to answer.
+bool sameBounds(const KDL::JntArray& a, const KDL::JntArray& b)
+{
+  return a.data.size() == b.data.size() && (a.data.size() == 0 || a.data == b.data);
 }
+}  // namespace
 
-TRAC_IK::TRAC_IK(rclcpp::Node::SharedPtr _nh, const KDL::Chain& _chain, const KDL::JntArray& _q_min, const KDL::JntArray& _q_max, double _maxtime, double _eps, SolveType _type):
-  TRAC_IK(_chain, _q_min, _q_max, _maxtime, _eps, _type, _nh->get_logger()) {}
-
-TRAC_IK::TRAC_IK(const KDL::Chain& _chain, const KDL::JntArray& _q_min, const KDL::JntArray& _q_max, double _maxtime, double _eps, SolveType _type, const rclcpp::Logger& _logger):
+TRAC_IK::TRAC_IK(const KDL::Chain& _chain, const KDL::JntArray& _q_min, const KDL::JntArray& _q_max, const rclcpp::Logger& _logger):
   logger(_logger),
   initialized(false),
   chain(_chain),
   lb(_q_min),
-  ub(_q_max),
-  eps(_eps),
-  maxtime(_maxtime),
-  solvetype(_type)
+  ub(_q_max)
 {
   initialize();
+}
+
+void TRAC_IK::configureSolvers(const Query& query)
+{
+  if (nl_solver && iksolver && sameBounds(query.q_min, solver_lb) && sameBounds(query.q_max, solver_ub))
+  {
+    // The bounds are baked into the inner solvers at construction, so only a change of bounds costs
+    // a rebuild; epsilon is settable and the timeout is set per iteration by runSolver.
+    nl_solver->setEps(query.epsilon);
+    iksolver->setEps(query.epsilon);
+    return;
+  }
+
+  solver_lb = query.q_min;
+  solver_ub = query.q_max;
+  nl_solver.reset(new NLOPT_IK::NLOPT_IK(chain, query.q_min, query.q_max, query.timeout, query.epsilon, logger));
+  iksolver.reset(new KDL::ChainIkSolverPos_TL(chain, query.q_min, query.q_max, query.timeout, query.epsilon, true, true));
+}
+
+void TRAC_IK::classifyJoints(const KDL::JntArray& q_min, const KDL::JntArray& q_max)
+{
+  types.resize(kinds.size());
+  for (uint i = 0; i < kinds.size(); i++)
+  {
+    if (kinds[i] != KDL::BasicJointType::RotJoint)
+    {
+      types[i] = kinds[i];
+      continue;
+    }
+    const bool unbounded = q_max(i) >= std::numeric_limits<float>::max() &&
+                           q_min(i) <= std::numeric_limits<float>::lowest();
+    types[i] = unbounded ? KDL::BasicJointType::Continuous : KDL::BasicJointType::RotJoint;
+  }
 }
 
 void TRAC_IK::initialize()
@@ -161,24 +97,25 @@ void TRAC_IK::initialize()
   assert(chain.getNrOfJoints() == ub.data.size());
 
   jacsolver.reset(new KDL::ChainJntToJacSolver(chain));
-  resetSolvers();
 
   for (uint i = 0; i < chain.segments.size(); i++)
   {
     std::string type = chain.segments[i].getJoint().getTypeName();
     if (type.find("Rot") != std::string::npos)
-    {
-      if (ub(types.size()) >= std::numeric_limits<float>::max() &&
-          lb(types.size()) <= std::numeric_limits<float>::lowest())
-        types.push_back(KDL::BasicJointType::Continuous);
-      else
-        types.push_back(KDL::BasicJointType::RotJoint);
-    }
+      kinds.push_back(KDL::BasicJointType::RotJoint);
     else if (type.find("Trans") != std::string::npos)
-      types.push_back(KDL::BasicJointType::TransJoint);
+      kinds.push_back(KDL::BasicJointType::TransJoint);
   }
 
-  assert(types.size() == lb.data.size());
+  assert(kinds.size() == lb.data.size());
+
+  // The mechanism's own bounds are the default query's bounds, so the solvers and the classification
+  // both start from them; CartToJnt redoes each per call.
+  Query mechanism;
+  mechanism.q_min = lb;
+  mechanism.q_max = ub;
+  configureSolvers(mechanism);
+  classifyJoints(lb, ub);
 
   initialized = true;
 }
@@ -220,12 +157,13 @@ inline void normalizeAngle(double& val, const double& target)
 
 template<typename T1, typename T2>
 bool TRAC_IK::runSolver(T1& solver, T2& other_solver,
+                        const Query& query,
                         const KDL::JntArray &q_init,
                         const KDL::Frame &p_in)
 {
   KDL::JntArray q_out;
 
-  double fulltime = maxtime;
+  double fulltime = query.timeout;
   KDL::JntArray seed = q_init;
 
   while (true)
@@ -238,18 +176,18 @@ bool TRAC_IK::runSolver(T1& solver, T2& other_solver,
 
     solver.setMaxtime(time_left);
 
-    int RC = solver.CartToJnt(seed, p_in, q_out, bounds);
+    int RC = solver.CartToJnt(seed, p_in, q_out, query.tolerance_bounds);
     if (RC >= 0)
     {
-      switch (solvetype)
+      switch (query.solve_type)
       {
       case Manip1:
       case Manip2:
       case Manip3:
-        normalize_limits(q_init, q_out);
+        normalize_limits(q_init, q_out, query.q_min, query.q_max);
         break;
       default:
-        normalize_seed(q_init, q_out);
+        normalize_seed(q_init, q_out, query.q_min, query.q_max);
         break;
       }
       mtx_.lock();
@@ -259,20 +197,20 @@ bool TRAC_IK::runSolver(T1& solver, T2& other_solver,
         uint curr_size = solutions.size();
         errors.resize(curr_size);
         double err, penalty, manip_value;
-        switch (solvetype)
+        switch (query.solve_type)
         {
         case Manip1:
-          penalty = manipPenalty(q_out);
+          penalty = manipPenalty(q_out, query.q_min, query.q_max);
           manip_value = TRAC_IK::manipValue1(q_out);
           err = penalty * manip_value;
           break;
         case Manip2:
-          penalty = manipPenalty(q_out);
+          penalty = manipPenalty(q_out, query.q_min, query.q_max);
           manip_value = TRAC_IK::manipValue2(q_out);
           err = penalty * manip_value;
           break;
         case Manip3:
-          penalty = manipPenalty(q_out);
+          penalty = manipPenalty(q_out, query.q_min, query.q_max);
           manip_value = TRAC_IK::manipValue3(q_out);
           err = penalty * manip_value;
           break;
@@ -285,14 +223,14 @@ bool TRAC_IK::runSolver(T1& solver, T2& other_solver,
       mtx_.unlock();
     }
 
-    if (!solutions.empty() && solvetype == Speed)
+    if (!solutions.empty() && query.solve_type == Speed)
       break;
 
     for (unsigned int j = 0; j < seed.data.size(); j++)
       if (types[j] == KDL::BasicJointType::Continuous)
         seed(j) = fRand(q_init(j) - 2 * M_PI, q_init(j) + 2 * M_PI);
       else
-        seed(j) = fRand(lb(j), ub(j));
+        seed(j) = fRand(query.q_min(j), query.q_max(j));
   }
   other_solver.abort();
 
@@ -302,12 +240,13 @@ bool TRAC_IK::runSolver(T1& solver, T2& other_solver,
 }
 
 
-void TRAC_IK::normalize_seed(const KDL::JntArray& seed, KDL::JntArray& solution)
+void TRAC_IK::normalize_seed(const KDL::JntArray& seed, KDL::JntArray& solution,
+                             const KDL::JntArray& q_min, const KDL::JntArray& q_max)
 {
   // Make sure rotational joint values are within 1 revolution of seed; then
   // ensure joint limits are met.
 
-  for (uint i = 0; i < lb.data.size(); i++)
+  for (uint i = 0; i < q_min.data.size(); i++)
   {
 
     if (types[i] == KDL::BasicJointType::TransJoint)
@@ -324,18 +263,19 @@ void TRAC_IK::normalize_seed(const KDL::JntArray& seed, KDL::JntArray& solution)
       continue;
     }
 
-    normalizeAngle(val, lb(i), ub(i));
+    normalizeAngle(val, q_min(i), q_max(i));
 
     solution(i) = val;
   }
 }
 
-void TRAC_IK::normalize_limits(const KDL::JntArray& seed, KDL::JntArray& solution)
+void TRAC_IK::normalize_limits(const KDL::JntArray& seed, KDL::JntArray& solution,
+                               const KDL::JntArray& q_min, const KDL::JntArray& q_max)
 {
   // Make sure rotational joint values are within 1 revolution of middle of
   // limits; then ensure joint limits are met.
 
-  for (uint i = 0; i < lb.data.size(); i++)
+  for (uint i = 0; i < q_min.data.size(); i++)
   {
 
     if (types[i] == KDL::BasicJointType::TransJoint)
@@ -344,7 +284,7 @@ void TRAC_IK::normalize_limits(const KDL::JntArray& seed, KDL::JntArray& solutio
     double target = seed(i);
 
     if (types[i] == KDL::BasicJointType::RotJoint && types[i] != KDL::BasicJointType::Continuous)
-      target = (ub(i) + lb(i)) / 2.0;
+      target = (q_max(i) + q_min(i)) / 2.0;
 
     double val = solution(i);
 
@@ -356,7 +296,7 @@ void TRAC_IK::normalize_limits(const KDL::JntArray& seed, KDL::JntArray& solutio
       continue;
     }
 
-    normalizeAngle(val, lb(i), ub(i));
+    normalizeAngle(val, q_min(i), q_max(i));
 
     solution(i) = val;
   }
@@ -364,15 +304,15 @@ void TRAC_IK::normalize_limits(const KDL::JntArray& seed, KDL::JntArray& solutio
 }
 
 
-double TRAC_IK::manipPenalty(const KDL::JntArray& arr)
+double TRAC_IK::manipPenalty(const KDL::JntArray& arr, const KDL::JntArray& q_min, const KDL::JntArray& q_max)
 {
   double penalty = 1.0;
   for (uint i = 0; i < arr.data.size(); i++)
   {
     if (types[i] == KDL::BasicJointType::Continuous)
       continue;
-    double range = ub(i) - lb(i);
-    penalty *= ((arr(i) - lb(i)) * (ub(i) - arr(i)) / (range * range));
+    double range = q_max(i) - q_min(i);
+    penalty *= ((arr(i) - q_min(i)) * (q_max(i) - arr(i)) / (range * range));
   }
   return std::max(0.0, 1.0 - exp(-1 * penalty));
 }
@@ -413,7 +353,7 @@ Eigen::MatrixXd TRAC_IK::computeSingularValues(const KDL::JntArray& arr)
 }
 
 
-int TRAC_IK::CartToJnt(const KDL::JntArray &q_init, const KDL::Frame &p_in, KDL::JntArray &q_out, const KDL::Twist& _bounds)
+int TRAC_IK::CartToJnt(const KDL::JntArray &q_init, const KDL::Frame &p_in, KDL::JntArray &q_out, const Query& query)
 {
 
   if (!initialized)
@@ -422,6 +362,26 @@ int TRAC_IK::CartToJnt(const KDL::JntArray &q_init, const KDL::Frame &p_in, KDL:
     return -1;
   }
 
+  // Empty per-call bounds mean the mechanism's own; a non-empty pair must fit the chain.
+  const bool per_call_bounds = query.q_min.data.size() != 0 || query.q_max.data.size() != 0;
+  if (per_call_bounds &&
+      (query.q_min.data.size() != chain.getNrOfJoints() || query.q_max.data.size() != chain.getNrOfJoints()))
+  {
+    RCLCPP_ERROR(logger, "Query joint bounds must have one entry per chain joint (%d), or none at all",
+                 (int)chain.getNrOfJoints());
+    return -1;
+  }
+  // One resolved query from here on: the empty pair that means "the mechanism's own" is filled in
+  // once, so nothing downstream has to remember what empty meant.
+  Query resolved = query;
+  if (!per_call_bounds)
+  {
+    resolved.q_min = lb;
+    resolved.q_max = ub;
+  }
+
+  configureSolvers(resolved);
+  classifyJoints(resolved.q_min, resolved.q_max);
 
   start_time = system_clock.now();
 
@@ -432,10 +392,9 @@ int TRAC_IK::CartToJnt(const KDL::JntArray &q_init, const KDL::Frame &p_in, KDL:
   solutions.clear();
   errors.clear();
 
-  bounds = _bounds;
-
-  task1 = std::thread(&TRAC_IK::runKDL, this, q_init, p_in);
-  task2 = std::thread(&TRAC_IK::runNLOPT, this, q_init, p_in);
+  // cref, not a copy: the query lives on this stack frame and both threads are joined below.
+  task1 = std::thread(&TRAC_IK::runKDL, this, std::cref(resolved), q_init, p_in);
+  task2 = std::thread(&TRAC_IK::runNLOPT, this, std::cref(resolved), q_init, p_in);
 
   if (task1.joinable())
       task1.join();
@@ -449,7 +408,7 @@ int TRAC_IK::CartToJnt(const KDL::JntArray &q_init, const KDL::Frame &p_in, KDL:
     return -3;
   }
 
-  switch (solvetype)
+  switch (query.solve_type)
   {
   case Manip1:
   case Manip2:

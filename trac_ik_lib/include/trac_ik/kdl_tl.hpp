@@ -35,6 +35,7 @@ OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <kdl/chainfksolverpos_recursive.hpp>
 #include <kdl/chainiksolvervel_pinv.hpp>
 #include <rclcpp/clock.hpp>
+#include <cmath>
 
 namespace TRAC_IK
 {
@@ -60,6 +61,11 @@ public:
   inline void setMaxtime(double t)
   {
     maxtime = t;
+  }
+
+  inline void setEps(double e)
+  {
+    eps = std::abs(e);
   }
 
 private:

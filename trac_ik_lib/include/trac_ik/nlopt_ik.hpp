@@ -34,33 +34,31 @@ OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rclcpp/rclcpp.hpp>
 #include <trac_ik/kdl_tl.hpp>
 #include <nlopt.hpp>
+#include <cmath>
 
 
 namespace NLOPT_IK
 {
 
-enum OptType { Joint, DualQuat, SumSq, L2 };
-
-
 class NLOPT_IK
 {
   friend class TRAC_IK::TRAC_IK;
 public:
-  NLOPT_IK(rclcpp::Node::SharedPtr _nh, const KDL::Chain& _chain, const KDL::JntArray& _q_min, const KDL::JntArray& _q_max, double _maxtime = 0.005, double _eps = 1e-3, OptType type = SumSq);
-  NLOPT_IK(const KDL::Chain& _chain, const KDL::JntArray& _q_min, const KDL::JntArray& _q_max, double _maxtime = 0.005, double _eps = 1e-3, OptType _type = SumSq, const rclcpp::Logger& _logger = rclcpp::get_logger("trac_ik.trac_ik_lib"));
+  NLOPT_IK(const KDL::Chain& _chain, const KDL::JntArray& _q_min, const KDL::JntArray& _q_max, double _maxtime = 0.005, double _eps = 1e-3, const rclcpp::Logger& _logger = rclcpp::get_logger("trac_ik.trac_ik_lib"));
 
   ~NLOPT_IK() {};
-  int CartToJnt(const KDL::JntArray& q_init, const KDL::Frame& p_in, KDL::JntArray& q_out, const KDL::Twist bounds = KDL::Twist::Zero(), const KDL::JntArray& q_desired = KDL::JntArray());
+  int CartToJnt(const KDL::JntArray& q_init, const KDL::Frame& p_in, KDL::JntArray& q_out, const KDL::Twist bounds = KDL::Twist::Zero());
 
-  double minJoints(const std::vector<double>& x, std::vector<double>& grad);
-  //  void cartFourPointError(const std::vector<double>& x, double error[]);
   void cartSumSquaredError(const std::vector<double>& x, double error[]);
-  void cartDQError(const std::vector<double>& x, double error[]);
-  void cartL2NormError(const std::vector<double>& x, double error[]);
 
   inline void setMaxtime(double t)
   {
     maxtime = t;
+  }
+
+  inline void setEps(double e)
+  {
+    eps = std::abs(e);
   }
 
 private:
@@ -82,23 +80,13 @@ private:
   std::vector<double> ub;
 
   const KDL::Chain chain;
-  std::vector<double> des;
-
 
   KDL::ChainFkSolverPos_recursive fksolver;
 
   double maxtime;
   double eps;
-  int iter_counter;
-  OptType TYPE;
 
   KDL::Frame targetPose;
-  KDL::Frame z_up ;
-  KDL::Frame x_out;
-  KDL::Frame y_out;
-  KDL::Frame z_target;
-  KDL::Frame x_target;
-  KDL::Frame y_target;
 
   std::vector<KDL::BasicJointType> types;
 
