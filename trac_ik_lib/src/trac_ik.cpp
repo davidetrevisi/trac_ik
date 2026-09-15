@@ -34,6 +34,7 @@ OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rclcpp/rclcpp.hpp>
 #include <algorithm>
 #include <limits>
+#include <string>
 
 namespace TRAC_IK
 {
@@ -47,14 +48,23 @@ bool sameBounds(const KDL::JntArray& a, const KDL::JntArray& b)
 }
 }  // namespace
 
-TRAC_IK::TRAC_IK(const KDL::Chain& _chain, const KDL::JntArray& _q_min, const KDL::JntArray& _q_max, const rclcpp::Logger& _logger):
+TRAC_IK::TRAC_IK(const KDL::Chain& _chain, const KDL::JntArray& _q_min, const KDL::JntArray& _q_max,
+                 const JointCouplings& _couplings, const rclcpp::Logger& _logger):
   logger(_logger),
   initialized(false),
   chain(_chain),
   lb(_q_min),
-  ub(_q_max)
+  ub(_q_max),
+  couplings(_couplings)
 {
   initialize();
+}
+
+void TRAC_IK::failInitialization(const std::string& why)
+{
+  init_error = why;
+  initialized = false;
+  RCLCPP_FATAL(logger, "TRAC-IK cannot use this mechanism: %s", why.c_str());
 }
 
 void TRAC_IK::configureSolvers(const Query& query)
@@ -108,6 +118,35 @@ void TRAC_IK::initialize()
   }
 
   assert(kinds.size() == lb.data.size());
+
+  // Validity first: a rejected description reports zero active joints, so substituting for it by
+  // size would quietly turn a refusal into an uncoupled chain.
+  if (!couplings.valid())
+  {
+    failInitialization(couplings.error());
+    return;
+  }
+
+  // An empty description means an uncoupled chain, so it becomes the uncoupled description of the
+  // right size once and nothing below has to ask which of the two it is holding.
+  if (couplings.size() == 0)
+    couplings = JointCouplings(chain.getNrOfJoints());
+  if (couplings.size() != chain.getNrOfJoints())
+  {
+    failInitialization("the joint couplings have " + std::to_string(couplings.size()) +
+                       " entries, but the chain has " + std::to_string(chain.getNrOfJoints()) + " joints");
+    return;
+  }
+
+  // Tightened in place, once, here: from now on lb and ub ARE the effective bounds, so the restarts
+  // sample inside the reachable interval and a continuous mimicked joint whose mimic is bounded
+  // stops being continuous without anything special-casing it below.
+  std::string why;
+  if (!couplings.tighten(lb, ub, why))
+  {
+    failInitialization(why);
+    return;
+  }
 
   // The mechanism's own bounds are the default query's bounds, so the solvers and the classification
   // both start from them; CartToJnt redoes each per call.
@@ -374,7 +413,21 @@ int TRAC_IK::CartToJnt(const KDL::JntArray &q_init, const KDL::Frame &p_in, KDL:
   // One resolved query from here on: the empty pair that means "the mechanism's own" is filled in
   // once, so nothing downstream has to remember what empty meant.
   Query resolved = query;
-  if (!per_call_bounds)
+  if (per_call_bounds)
+  {
+    // The couplings describe the mechanism, so they hold for a narrowed search too. Without this a
+    // query's own bounds would undo the tightening the constructor did -- including the
+    // reclassification of a mimicked joint that is no longer continuous -- and the restarts would
+    // sample outside the interval the couplings prove the joint cannot leave.
+    std::string why;
+    if (!couplings.tighten(resolved.q_min, resolved.q_max, why))
+    {
+      RCLCPP_ERROR(logger, "This query's joint bounds leave no configuration the couplings allow: %s",
+                   why.c_str());
+      return -1;
+    }
+  }
+  else
   {
     resolved.q_min = lb;
     resolved.q_max = ub;

@@ -17,6 +17,7 @@ find_package(urdf REQUIRED)
 
 # Build
 add_library(trac_ik SHARED
+  src/joint_coupling.cpp
   src/kdl_tl.cpp
   src/nlopt_ik.cpp
   src/trac_ik.cpp)

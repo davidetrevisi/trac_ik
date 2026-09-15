@@ -372,7 +372,9 @@ bool TRAC_IKKinematicsPlugin::searchPositionIK(const geometry_msgs::msg::Pose &i
 
   // One solver for the whole call: the mechanism does not change between retries, only the budget
   // left to spend on the next one, and that rides on the query.
-  TRAC_IK::TRAC_IK ik_solver(chain, joint_min, joint_max, node_->get_logger());
+  // Ticket 06 builds the real couplings from the robot model; until then the plugin declares an
+  // uncoupled chain, which is exactly what it assumed before this parameter existed.
+  TRAC_IK::TRAC_IK ik_solver(chain, joint_min, joint_max, TRAC_IK::JointCouplings(), node_->get_logger());
 
   auto end_time = std::chrono::system_clock::now() + std::chrono::duration<double>(timeout);
   while (std::chrono::system_clock::now() < end_time)

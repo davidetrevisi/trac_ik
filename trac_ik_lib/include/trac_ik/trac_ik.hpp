@@ -32,6 +32,7 @@ OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef TRAC_IK_HPP
 #define TRAC_IK_HPP
 
+#include <trac_ik/joint_coupling.hpp>
 #include <trac_ik/nlopt_ik.hpp>
 #include <kdl/chainjnttojacsolver.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -82,10 +83,33 @@ struct Query
 class TRAC_IK
 {
 public:
+  /**
+   * The mechanism, and nothing about any one question asked of it (that is Query's).
+   *
+   * `_couplings` describes how the chain's joints are coupled; the default, an empty value, means an
+   * uncoupled chain and constructs exactly as before. The bounds are tightened through the couplings
+   * in place here, so getKDLLimits answers with effective bounds and not with what was passed.
+   *
+   * Construction can fail -- a description the couplings reject, or a mechanism no configuration
+   * satisfies. It does not throw: a FATAL line names the offending joint, isInitialized() is false,
+   * initializationError() says why, and CartToJnt returns -1.
+   */
   TRAC_IK(const KDL::Chain& _chain, const KDL::JntArray& _q_min, const KDL::JntArray& _q_max,
+          const JointCouplings& _couplings = JointCouplings(),
           const rclcpp::Logger& _logger = rclcpp::get_logger("trac_ik.trac_ik_lib"));
 
   ~TRAC_IK();
+
+  bool isInitialized() const
+  {
+    return initialized;
+  }
+
+  /// Why initialisation failed, naming the joint at fault; empty when it did not fail.
+  const std::string& initializationError() const
+  {
+    return init_error;
+  }
 
   bool getKDLChain(KDL::Chain& chain_)
   {
@@ -93,6 +117,9 @@ public:
     return initialized;
   }
 
+  /// The EFFECTIVE bounds: the constructor's, tightened through the couplings. For a coupled chain
+  /// these are narrower than what was passed, and they are what "inside its limits" means here --
+  /// a caller sampling configurations from them samples ones the mechanism can actually hold.
   bool getKDLLimits(KDL::JntArray& lb_, KDL::JntArray& ub_)
   {
     lb_ = lb;
@@ -137,9 +164,16 @@ public:
 private:
   rclcpp::Logger logger;
   bool initialized;
+  /// Why initialisation failed; empty while it has not.
+  std::string init_error;
   KDL::Chain chain;
-  /// The mechanism's own joint bounds, from the constructor.
+  /// The mechanism's effective joint bounds: the constructor's, tightened through the couplings at
+  /// construction. Nothing keeps the untightened pair -- a bound the mechanism cannot reach is not
+  /// a fact any part of a solve wants.
   KDL::JntArray lb, ub;
+  /// How this chain's joints are coupled. Empty-as-passed becomes the uncoupled description of the
+  /// right size, so nothing downstream has to spell "no couplings" twice.
+  JointCouplings couplings;
   /// The bounds the inner solvers currently hold, so a query that does not change them costs no
   /// rebuild.
   KDL::JntArray solver_lb, solver_ub;
@@ -206,6 +240,10 @@ private:
   }
 
   void initialize();
+
+  /// Leave the object uninitialised, with a FATAL line and a retrievable reason. The fork's one
+  /// failure convention: no exceptions, and never a solver that answers as if nothing were wrong.
+  void failInitialization(const std::string& why);
 
   /// Decide, for these bounds, which rotational joints are continuous. The test is the one both
   /// inner solvers apply to the bounds they are built with, so all three agree on every joint.

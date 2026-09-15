@@ -620,3 +620,510 @@ TEST(TracIkLib, MimicArmPositionOnlyRoundTrip)
   EXPECT_GE(static_cast<double>(solved) / kSamples, kSolveRateFloor)
       << "solved " << solved << " of " << kSamples;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Joint couplings and effective bounds (ticket 04). The value type owns expand, reduce, tighten and
+// the reduced Jacobian; the solver is told how its chain is coupled at construction and answers
+// honestly about what range each joint can actually take. The solver does not yet SEARCH in reduced
+// space -- that is ticket 05 -- so nothing here asserts a solution satisfies a coupling.
+// ---------------------------------------------------------------------------------------------
+
+namespace
+{
+
+// The description a caller hands the library, built from the same URDF the fixture parsed. This is
+// what the plugin will build from MoveIt's robot model in ticket 06; here it comes from the model
+// the Fixture already has.
+std::vector<TRAC_IK::JointCoupling> couplingsOf(const Fixture& f)
+{
+  std::vector<TRAC_IK::JointCoupling> out(f.chain.getNrOfJoints());
+  for (unsigned int i = 0; i < f.joint_names.size(); ++i)
+  {
+    out[i].name = f.joint_names[i];
+    const auto joint = f.model.getJoint(f.joint_names[i]);
+    if (!joint->mimic)
+      continue;
+    out[i].mimicked_index = f.indexOf(joint->mimic->joint_name);
+    out[i].multiplier = joint->mimic->multiplier;
+    out[i].offset = joint->mimic->offset;
+  }
+  return out;
+}
+
+// The two coupled fixtures, each named by one mimic joint and the joint it follows. The refusals
+// below are properties of the description rather than of a robot, so each is checked on both: the
+// crane (prismatic, multiplier 1, offset 0) and mimic_arm (revolute, negative multiplier, offset).
+struct CoupledFixture
+{
+  const char* urdf;
+  const char* tip;
+  const char* mimic;
+  const char* mimicked;
+};
+
+const CoupledFixture kCoupledFixtures[] = {
+  { "crane.urdf", "jib_ext_link", "jib_ext_2", "jib_ext" },
+  { "mimic_arm.urdf", "tool_link", "j3", "j2" },
+};
+
+// A description the JointCouplings constructor must refuse, checked at both seams it can be refused
+// at: the value itself, and the solver that was handed it. A solver that took the description anyway
+// would answer queries about a mechanism that does not exist.
+void expectRefused(const Fixture& f, const std::vector<TRAC_IK::JointCoupling>& description,
+                   const std::string& joint_name)
+{
+  const TRAC_IK::JointCouplings couplings(description);
+  ASSERT_FALSE(couplings.valid()) << "this description must not be accepted";
+  EXPECT_NE(couplings.error().find(joint_name), std::string::npos)
+      << "the reason must name the offending joint; got: " << couplings.error();
+
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, couplings);
+  EXPECT_FALSE(ik.isInitialized());
+  EXPECT_EQ(ik.initializationError(), couplings.error());
+
+  // ...and it stays refused per call, rather than answering as if nothing were wrong.
+  KDL::JntArray seed(f.chain.getNrOfJoints()), sol;
+  EXPECT_LT(ik.CartToJnt(seed, KDL::Frame::Identity(), sol, defaultQuery()), 0);
+}
+
+// The reduced Jacobian is the derivative of the tip pose with respect to the ACTIVE joints, so the
+// honest check is against forward kinematics itself rather than against a restatement of the fold.
+// (foldJacobian is the verb CONTEXT.md uses for the operation; the object it produces is the
+// reduced Jacobian.)
+void expectReducedJacobianMatchesFiniteDifferences(const Fixture& f, const TRAC_IK::JointCouplings& c,
+                                                  const KDL::JntArray& reduced)
+{
+  KDL::JntArray full;
+  c.expand(reduced, full);
+
+  KDL::ChainJntToJacSolver jacsolver(f.chain);
+  KDL::Jacobian jac(f.chain.getNrOfJoints());
+  ASSERT_GE(jacsolver.JntToJac(full, jac), 0);
+
+  Eigen::MatrixXd reduced_jac;
+  c.foldJacobian(jac, reduced_jac);
+  ASSERT_EQ(reduced_jac.rows(), 6);
+  ASSERT_EQ(static_cast<unsigned int>(reduced_jac.cols()), c.reducedSize());
+
+  // Central differences, and not a smaller step: KDL's GetRot reads any rotation below about 1e-6
+  // rad as none at all, so a forward difference fine enough to make the truncation error negligible
+  // reports every angular column as zero and the test passes or fails for the wrong reason.
+  const double h = 1e-4;
+  for (unsigned int k = 0; k < c.reducedSize(); ++k)
+  {
+    KDL::JntArray behind = reduced, ahead = reduced;
+    behind(k) -= h;
+    ahead(k) += h;
+    KDL::JntArray behind_full, ahead_full;
+    c.expand(behind, behind_full);
+    c.expand(ahead, ahead_full);
+    const KDL::Frame from = f.fk(behind_full), to = f.fk(ahead_full);
+
+    const KDL::Vector dp = (to.p - from.p) / (2 * h);
+    // KDL expresses the Jacobian's angular part in the base frame, so the rotation difference has
+    // to be taken there too -- tip-frame it would be right only where the tip happens to be aligned.
+    const KDL::Vector dr = (to.M * from.M.Inverse()).GetRot() / (2 * h);
+    for (int axis = 0; axis < 3; ++axis)
+    {
+      EXPECT_NEAR(reduced_jac(axis, k), dp[axis], 1e-5) << "linear axis " << axis << ", active joint " << k;
+      EXPECT_NEAR(reduced_jac(axis + 3, k), dr[axis], 1e-5) << "angular axis " << axis << ", active joint " << k;
+    }
+  }
+}
+
+}  // namespace
+
+TEST(TracIkLibCouplings, UncoupledChainConstructsExactlyAsBefore)
+{
+  Fixture f("arm6.urdf", "base_link", "tool_link");
+  TRAC_IK::TRAC_IK plain(f.chain, f.lb, f.ub);
+  TRAC_IK::TRAC_IK described(f.chain, f.lb, f.ub, TRAC_IK::JointCouplings(couplingsOf(f)));
+  ASSERT_TRUE(plain.isInitialized());
+  ASSERT_TRUE(described.isInitialized());
+  EXPECT_TRUE(plain.initializationError().empty());
+
+  // An uncoupled chain has nothing to tighten, whether the description is defaulted or spelled out.
+  KDL::JntArray a_lb, a_ub, b_lb, b_ub;
+  ASSERT_TRUE(plain.getKDLLimits(a_lb, a_ub));
+  ASSERT_TRUE(described.getKDLLimits(b_lb, b_ub));
+  for (unsigned int i = 0; i < f.chain.getNrOfJoints(); ++i)
+  {
+    EXPECT_DOUBLE_EQ(a_lb(i), f.lb(i)) << f.joint_names[i];
+    EXPECT_DOUBLE_EQ(a_ub(i), f.ub(i)) << f.joint_names[i];
+    EXPECT_DOUBLE_EQ(b_lb(i), f.lb(i)) << f.joint_names[i];
+    EXPECT_DOUBLE_EQ(b_ub(i), f.ub(i)) << f.joint_names[i];
+  }
+
+  const TRAC_IK::JointCouplings couplings(couplingsOf(f));
+  EXPECT_EQ(couplings.reducedSize(), f.chain.getNrOfJoints()) << "every joint of arm6 is active";
+}
+
+TEST(TracIkLibCouplings, MimicArmEffectiveBoundsAreSignAware)
+{
+  Fixture f("mimic_arm.urdf", "base_link", "tool_link");
+  const TRAC_IK::JointCouplings couplings(couplingsOf(f));
+  ASSERT_TRUE(couplings.valid()) << couplings.error();
+  EXPECT_EQ(couplings.reducedSize(), 3u) << "4 chain joints, j3 following j2";
+
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, couplings);
+  ASSERT_TRUE(ik.isInitialized()) << ik.initializationError();
+  KDL::JntArray lb, ub;
+  ASSERT_TRUE(ik.getKDLLimits(lb, ub));
+
+  // j3 = -0.5 * j2 + 0.3 over j3's own [-0.2, 0.8]. Mapped back that is [-1.0, 1.0] -- the negative
+  // multiplier swaps the ends, so getting the sign wrong gives [1.0, -1.0] or an untightened j2.
+  const int j2 = f.indexOf("j2"), j3 = f.indexOf("j3");
+  EXPECT_NEAR(lb(j2), -1.0, 1e-12) << "j2's lower bound must tighten from -1.5";
+  EXPECT_NEAR(ub(j2), 1.0, 1e-12) << "j2's upper bound must tighten from 1.5";
+  // ...and j3 can only take what j2's effective interval maps onto, which here is its own range.
+  EXPECT_NEAR(lb(j3), -0.2, 1e-12);
+  EXPECT_NEAR(ub(j3), 0.8, 1e-12);
+
+  const int j1 = f.indexOf("j1"), j4 = f.indexOf("j4");
+  EXPECT_DOUBLE_EQ(lb(j1), f.lb(j1)) << "an uncoupled joint is left alone";
+  EXPECT_DOUBLE_EQ(ub(j4), f.ub(j4));
+}
+
+TEST(TracIkLibCouplings, CraneEffectiveBoundsAreItsOwn)
+{
+  Fixture f("crane.urdf", "base_link", "jib_ext_link");
+  const TRAC_IK::JointCouplings couplings(couplingsOf(f));
+  ASSERT_TRUE(couplings.valid()) << couplings.error();
+  EXPECT_EQ(couplings.reducedSize(), 5u) << "9 chain joints, 4 of them mimic joints";
+
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, couplings);
+  ASSERT_TRUE(ik.isInitialized()) << ik.initializationError();
+  KDL::JntArray lb, ub;
+  ASSERT_TRUE(ik.getKDLLimits(lb, ub));
+
+  // The crane's couplings are all multiplier 1, offset 0, onto stages at least as long as the one
+  // they follow, so no ACTIVE joint narrows: the intersection is the joint's own interval. A
+  // tightening that fired here would be tightening too eagerly, which is the failure the crane is
+  // the only fixture positioned to catch.
+  for (unsigned int i = 0; i < f.chain.getNrOfJoints(); ++i)
+  {
+    if (couplings.isMimic(i))
+      continue;
+    EXPECT_DOUBLE_EQ(lb(i), f.lb(i)) << f.joint_names[i];
+    EXPECT_DOUBLE_EQ(ub(i), f.ub(i)) << f.joint_names[i];
+  }
+  EXPECT_TRUE(f.unbounded(f.indexOf("turret_rotation"))) << "nothing follows the turret, so it stays continuous";
+  EXPECT_DOUBLE_EQ(ub(f.indexOf("main_boom_ext")), 1.918);
+  EXPECT_DOUBLE_EQ(ub(f.indexOf("jib_ext")), 1.370);
+
+  // The mimic joints do narrow, in the one place the crane has a mismatch: jib_ext_2's own limit is
+  // 1.918, but it is equal to jib_ext, which stops at 1.370, so 1.918 is a reach it never has. The
+  // three main boom stages follow a stage of their own length and keep theirs.
+  EXPECT_DOUBLE_EQ(ub(f.indexOf("jib_ext_2")), 1.370) << "a mimic joint cannot outrun the joint it follows";
+  for (const char* stage : { "main_boom_ext_2", "main_boom_ext_3", "main_boom_ext_4" })
+  {
+    EXPECT_DOUBLE_EQ(lb(f.indexOf(stage)), 0.0) << stage;
+    EXPECT_DOUBLE_EQ(ub(f.indexOf(stage)), 1.918) << stage;
+  }
+}
+
+// A continuous joint whose mimic joint is bounded is not continuous: its range is finite, and the
+// restarts have to sample inside it. No fixture robot has that shape, so the coupling is
+// declared over the crane's chain -- the bound arithmetic is what is under test, not the crane.
+TEST(TracIkLibCouplings, ContinuousMimickedJointReclassifiesAsBounded)
+{
+  Fixture f("crane.urdf", "base_link", "jib_ext_link");
+  const int turret = f.indexOf("turret_rotation"), lift = f.indexOf("main_boom_lift");
+  ASSERT_TRUE(f.unbounded(turret)) << "the turret is continuous as the fixture stands";
+
+  std::vector<TRAC_IK::JointCoupling> description = couplingsOf(f);
+  description[lift].mimicked_index = turret;
+  description[lift].multiplier = 1.0;
+  description[lift].offset = 0.0;
+
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, TRAC_IK::JointCouplings(description));
+  ASSERT_TRUE(ik.isInitialized()) << ik.initializationError();
+  KDL::JntArray lb, ub;
+  ASSERT_TRUE(ik.getKDLLimits(lb, ub));
+
+  EXPECT_DOUBLE_EQ(lb(turret), f.lb(lift)) << "the lift's own lower bound is now the turret's";
+  EXPECT_DOUBLE_EQ(ub(turret), f.ub(lift));
+  EXPECT_LT(ub(turret), std::numeric_limits<float>::max()) << "the turret is no longer unbounded";
+
+  // The reclassification, observed rather than asserted about: a joint still treated as continuous
+  // is wrapped to within a revolution of the seed and left there, so a solution would come back
+  // outside the interval the couplings just proved it cannot leave.
+  TRAC_IK::Query q = defaultQuery();
+  q.tolerance_bounds.rot.x(std::numeric_limits<float>::max());
+  q.tolerance_bounds.rot.y(std::numeric_limits<float>::max());
+  q.tolerance_bounds.rot.z(std::numeric_limits<float>::max());
+
+  std::mt19937 rng(41);
+  int solved = 0;
+  for (int n = 0; n < 20; ++n)
+  {
+    KDL::JntArray inside(f.chain.getNrOfJoints());
+    for (unsigned int i = 0; i < f.chain.getNrOfJoints(); ++i)
+      inside(i) = std::uniform_real_distribution<double>(lb(i), ub(i))(rng);
+    KDL::JntArray seed = f.randomConfig(rng), sol;
+    if (ik.CartToJnt(seed, f.fk(inside), sol, q) < 0)
+      continue;
+    ++solved;
+    EXPECT_GE(sol(turret), lb(turret) - 1e-6) << "the turret is bounded now";
+    EXPECT_LE(sol(turret), ub(turret) + 1e-6) << "the turret is bounded now";
+  }
+  EXPECT_GT(solved, 0) << "the narrowed crane must still reach some of its own poses";
+}
+
+TEST(TracIkLibCouplings, ZeroMultiplierPinsTheJoint)
+{
+  Fixture f("mimic_arm.urdf", "base_link", "tool_link");
+  const int j2 = f.indexOf("j2"), j3 = f.indexOf("j3");
+
+  // <mimic multiplier="0" offset="c"/> is well-formed URDF meaning "held at c", and real models use
+  // it. It is a pinned joint, not a refusal.
+  std::vector<TRAC_IK::JointCoupling> description = couplingsOf(f);
+  description[j3].multiplier = 0.0;
+  description[j3].offset = 0.5;
+
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, TRAC_IK::JointCouplings(description));
+  ASSERT_TRUE(ik.isInitialized()) << ik.initializationError();
+  KDL::JntArray lb, ub;
+  ASSERT_TRUE(ik.getKDLLimits(lb, ub));
+  EXPECT_DOUBLE_EQ(lb(j3), 0.5) << "pinned: a single point";
+  EXPECT_DOUBLE_EQ(ub(j3), 0.5);
+  // A pinned joint takes no value from the joint it follows, so it bounds it not at all.
+  EXPECT_DOUBLE_EQ(lb(j2), f.lb(j2)) << "a pinned mimic contributes no bound";
+  EXPECT_DOUBLE_EQ(ub(j2), f.ub(j2));
+
+  KDL::JntArray reduced(3), full;
+  reduced(0) = 0.1;
+  reduced(1) = 0.9;
+  reduced(2) = -0.4;
+  TRAC_IK::JointCouplings(description).expand(reduced, full);
+  EXPECT_DOUBLE_EQ(full(j3), 0.5) << "expand pins it too, whatever j2 is doing";
+}
+
+// The pin itself can be impossible, and that is a mechanism no configuration satisfies -- refused,
+// naming the joint, like any other. It is the zero multiplier that is supported, not a contradiction.
+TEST(TracIkLibCouplings, APinOutsideTheJointsOwnBoundsIsRefused)
+{
+  Fixture f("mimic_arm.urdf", "base_link", "tool_link");
+  std::vector<TRAC_IK::JointCoupling> description = couplingsOf(f);
+  description[f.indexOf("j3")].multiplier = 0.0;
+  description[f.indexOf("j3")].offset = 2.0;  // j3's own bounds are [-0.2, 0.8]
+
+  const TRAC_IK::JointCouplings couplings(description);
+  ASSERT_TRUE(couplings.valid()) << "the description is well-formed; the mechanism is not";
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, couplings);
+  EXPECT_FALSE(ik.isInitialized());
+  EXPECT_NE(ik.initializationError().find("j3"), std::string::npos) << ik.initializationError();
+}
+
+TEST(TracIkLibCouplings, AMimicOfAMimicIsRefused)
+{
+  for (const CoupledFixture& c : kCoupledFixtures)
+  {
+    Fixture f(c.urdf, "base_link", c.tip);
+    std::vector<TRAC_IK::JointCoupling> description = couplingsOf(f);
+    // Turn the joint that is followed into a follower of its own mimic joint.
+    description[f.indexOf(c.mimicked)].mimicked_index = f.indexOf(c.mimic);
+    expectRefused(f, description, c.mimicked);
+  }
+}
+
+TEST(TracIkLibCouplings, AMimickedJointOutsideTheChainIsRefused)
+{
+  for (const CoupledFixture& c : kCoupledFixtures)
+  {
+    Fixture f(c.urdf, "base_link", c.tip);
+    std::vector<TRAC_IK::JointCoupling> description = couplingsOf(f);
+    // Treating it as a constant would silently move the tip whenever the real joint moved.
+    description[f.indexOf(c.mimic)].mimicked_index = static_cast<int>(f.chain.getNrOfJoints());
+    expectRefused(f, description, c.mimic);
+  }
+}
+
+TEST(TracIkLibCouplings, AVariableCountOtherThanOneIsRefused)
+{
+  for (const CoupledFixture& c : kCoupledFixtures)
+  {
+    Fixture f(c.urdf, "base_link", c.tip);
+    std::vector<TRAC_IK::JointCoupling> description = couplingsOf(f);
+    // A planar or floating joint that survived kdl_parser: more than one variable behind one index.
+    // It is checked for every chain joint, active ones included, not only for the mimic joints.
+    description[f.indexOf(c.mimicked)].variable_count = 3;
+    expectRefused(f, description, c.mimicked);
+  }
+}
+
+TEST(TracIkLibCouplings, ANonFiniteMultiplierIsRefused)
+{
+  for (const CoupledFixture& c : kCoupledFixtures)
+  {
+    Fixture f(c.urdf, "base_link", c.tip);
+    for (const double bad : { std::numeric_limits<double>::quiet_NaN(),
+                              std::numeric_limits<double>::infinity() })
+    {
+      std::vector<TRAC_IK::JointCoupling> description = couplingsOf(f);
+      description[f.indexOf(c.mimic)].multiplier = bad;
+      expectRefused(f, description, c.mimic);
+    }
+  }
+}
+
+// Every operation is a no-op on a rejected description, so a caller who validates by hand and gets
+// it wrong reads nothing it never built. Only TRAC_IK refuses outright.
+TEST(TracIkLibCouplings, ARejectedDescriptionIsInert)
+{
+  Fixture f("crane.urdf", "base_link", "jib_ext_link");
+  std::vector<TRAC_IK::JointCoupling> description = couplingsOf(f);
+  description[f.indexOf("jib_ext_2")].mimicked_index = static_cast<int>(f.chain.getNrOfJoints());
+  const TRAC_IK::JointCouplings couplings(description);
+  ASSERT_FALSE(couplings.valid());
+
+  EXPECT_EQ(couplings.reducedSize(), 0u);
+  EXPECT_TRUE(couplings.activeIndices().empty());
+
+  KDL::JntArray reduced, full, lb = f.lb, ub = f.ub;
+  couplings.expand(reduced, full);
+  couplings.reduce(full, reduced);
+  KDL::Jacobian jac(f.chain.getNrOfJoints());
+  Eigen::MatrixXd reduced_jac;
+  couplings.foldJacobian(jac, reduced_jac);
+  std::string why;
+  EXPECT_FALSE(couplings.tighten(lb, ub, why));
+  EXPECT_EQ(why, couplings.error());
+}
+
+TEST(TracIkLibCouplings, ExpandFillsMimicEntriesAndReduceDropsThem)
+{
+  for (const char* fixture : { "crane.urdf", "mimic_arm.urdf" })
+  {
+    const bool is_crane = std::string(fixture) == "crane.urdf";
+    Fixture f(fixture, "base_link", is_crane ? "jib_ext_link" : "tool_link");
+    const TRAC_IK::JointCouplings couplings(couplingsOf(f));
+    ASSERT_TRUE(couplings.valid()) << couplings.error();
+
+    std::mt19937 rng(31);
+    // A full configuration whose mimic entries are deliberately WRONG: reduce keeps only what the
+    // solver chooses, so expanding again is exactly the repair an incoming seed needs.
+    KDL::JntArray full = f.randomConfig(rng), reduced, rebuilt;
+    couplings.reduce(full, reduced);
+    ASSERT_EQ(reduced.rows(), couplings.reducedSize());
+    couplings.expand(reduced, rebuilt);
+    ASSERT_EQ(rebuilt.rows(), f.chain.getNrOfJoints());
+
+    for (unsigned int k = 0; k < couplings.reducedSize(); ++k)
+      EXPECT_DOUBLE_EQ(rebuilt(couplings.activeIndices()[k]), full(couplings.activeIndices()[k]))
+          << "an active joint's value is the solver's and must survive the round trip";
+    expectMimicCouplings(f, rebuilt);
+  }
+}
+
+TEST(TracIkLibCouplings, ReducedJacobianIsTheDerivativeWithRespectToTheActiveJoints)
+{
+  {
+    Fixture f("crane.urdf", "base_link", "jib_ext_link");
+    const TRAC_IK::JointCouplings couplings(couplingsOf(f));
+    ASSERT_TRUE(couplings.valid()) << couplings.error();
+    std::mt19937 rng(32);
+    for (int n = 0; n < 5; ++n)
+    {
+      KDL::JntArray reduced;
+      couplings.reduce(f.mimicConsistentConfig(rng), reduced);
+      expectReducedJacobianMatchesFiniteDifferences(f, couplings, reduced);
+    }
+  }
+  {
+    // The sign of the fold: mimic_arm's multiplier is negative, so a column that added the mimic
+    // joint's contribution rather than subtracting it is wrong here and nowhere else.
+    Fixture f("mimic_arm.urdf", "base_link", "tool_link");
+    const TRAC_IK::JointCouplings couplings(couplingsOf(f));
+    ASSERT_TRUE(couplings.valid()) << couplings.error();
+    std::mt19937 rng(33);
+    for (int n = 0; n < 5; ++n)
+    {
+      KDL::JntArray reduced;
+      couplings.reduce(f.mimicConsistentConfig(rng), reduced);
+      expectReducedJacobianMatchesFiniteDifferences(f, couplings, reduced);
+    }
+  }
+}
+
+// The zero multiplier again, on the crane's prismatic couplings: a pinned joint is a pinned joint
+// whatever the joint is made of, and the crane is where a stage pinned mid-travel is plausible.
+TEST(TracIkLibCouplings, ZeroMultiplierPinsAPrismaticStageToo)
+{
+  Fixture f("crane.urdf", "base_link", "jib_ext_link");
+  const int pinned = f.indexOf("main_boom_ext_2"), driver = f.indexOf("main_boom_ext");
+
+  std::vector<TRAC_IK::JointCoupling> description = couplingsOf(f);
+  description[pinned].multiplier = 0.0;
+  description[pinned].offset = 0.5;
+
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, TRAC_IK::JointCouplings(description));
+  ASSERT_TRUE(ik.isInitialized()) << ik.initializationError();
+  KDL::JntArray lb, ub;
+  ASSERT_TRUE(ik.getKDLLimits(lb, ub));
+  EXPECT_DOUBLE_EQ(lb(pinned), 0.5);
+  EXPECT_DOUBLE_EQ(ub(pinned), 0.5);
+  // The other two stages still follow main_boom_ext at multiplier 1, so it keeps its own range.
+  EXPECT_DOUBLE_EQ(lb(driver), f.lb(driver));
+  EXPECT_DOUBLE_EQ(ub(driver), f.ub(driver));
+}
+
+// A query may narrow the search (ticket 03), but it cannot widen the mechanism: the couplings hold
+// for a per-call bound pair too. Without this a caller handing back the joints' own bounds would
+// undo the tightening the constructor did, for that call only, and never be told.
+TEST(TracIkLibCouplings, PerCallJointBoundsAreTightenedThroughTheCouplingsToo)
+{
+  Fixture f("mimic_arm.urdf", "base_link", "tool_link");
+  const int j2 = f.indexOf("j2");
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, TRAC_IK::JointCouplings(couplingsOf(f)));
+  ASSERT_TRUE(ik.isInitialized()) << ik.initializationError();
+
+  // The fixture's own, UNtightened bounds, handed over as this call's: j2 asks for [-1.5, 1.5]
+  // where the coupling allows only [-1.0, 1.0].
+  TRAC_IK::Query q = defaultQuery();
+  q.q_min = f.lb;
+  q.q_max = f.ub;
+  q.tolerance_bounds.rot.x(std::numeric_limits<float>::max());
+  q.tolerance_bounds.rot.y(std::numeric_limits<float>::max());
+  q.tolerance_bounds.rot.z(std::numeric_limits<float>::max());
+
+  std::mt19937 rng(42);
+  int solved = 0;
+  for (int n = 0; n < 40; ++n)
+  {
+    const KDL::Frame target = f.fk(f.mimicConsistentConfig(rng));
+    KDL::JntArray seed = f.randomConfig(rng), sol;
+    if (ik.CartToJnt(seed, target, sol, q) < 0)
+      continue;
+    ++solved;
+    EXPECT_GE(sol(j2), -1.0 - 1e-6) << "the query's wider bound must not survive the couplings";
+    EXPECT_LE(sol(j2), 1.0 + 1e-6) << "the query's wider bound must not survive the couplings";
+  }
+  EXPECT_GT(solved, 0) << "the coupled arm must still answer this query";
+}
+
+// ...and a per-call pair that leaves the couplings nothing is refused per call, not answered.
+TEST(TracIkLibCouplings, PerCallJointBoundsWithNoSatisfiableConfigurationAreRefused)
+{
+  Fixture f("mimic_arm.urdf", "base_link", "tool_link");
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, TRAC_IK::JointCouplings(couplingsOf(f)));
+  ASSERT_TRUE(ik.isInitialized()) << ik.initializationError();
+
+  TRAC_IK::Query q = defaultQuery();
+  q.q_min = f.lb;
+  q.q_max = f.ub;
+  // j2 above what j3's own bounds map back to (1.0), so the two intervals do not meet.
+  q.q_min(f.indexOf("j2")) = 1.2;
+  q.q_max(f.indexOf("j2")) = 1.4;
+
+  std::mt19937 rng(43);
+  KDL::JntArray seed = f.randomConfig(rng), sol;
+  // -1, the refusal, and not -3: the query is rejected before any search, so "no solution found"
+  // would mean the bounds had been accepted and simply not worked out.
+  EXPECT_EQ(ik.CartToJnt(seed, f.fk(f.mimicConsistentConfig(rng)), sol, q), -1);
+
+  // The mechanism is untouched by a query it refused.
+  KDL::JntArray lb, ub;
+  ASSERT_TRUE(ik.getKDLLimits(lb, ub));
+  EXPECT_NEAR(ub(f.indexOf("j2")), 1.0, 1e-12);
+}

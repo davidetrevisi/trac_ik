@@ -363,7 +363,7 @@ std::vector<Outcome> run(Solver which, const Mechanism& m, const Query& q,
   KDL::ChainIkSolverPos_NR_JL nr_jl(m.chain, m.lb, m.ub, fk, vik, kNrJlMaxIter, q.epsilon);
   KDL::ChainIkSolverPos_TL kdl_tl(m.chain, m.lb, m.ub, q.timeout, q.epsilon, true, true);
   NLOPT_IK::NLOPT_IK nlopt(m.chain, m.lb, m.ub, q.timeout, q.epsilon, logger);
-  TRAC_IK::TRAC_IK trac_ik(m.chain, m.lb, m.ub, logger);
+  TRAC_IK::TRAC_IK trac_ik(m.chain, m.lb, m.ub, TRAC_IK::JointCouplings(), logger);
 
   std::vector<Outcome> out;
   out.reserve(samples.size());
@@ -467,13 +467,13 @@ void runMicro(const Mechanism& m, const Query& q, int reps)
   {
     {
       const auto t0 = Clock::now();
-      TRAC_IK::TRAC_IK ik(m.chain, m.lb, m.ub, logger);
+      TRAC_IK::TRAC_IK ik(m.chain, m.lb, m.ub, TRAC_IK::JointCouplings(), logger);
       whole.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
     }
     {
       const auto t0 = Clock::now();
       {
-        TRAC_IK::TRAC_IK ik(m.chain, m.lb, m.ub, logger);
+        TRAC_IK::TRAC_IK ik(m.chain, m.lb, m.ub, TRAC_IK::JointCouplings(), logger);
       }
       whole_dtor.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
     }
