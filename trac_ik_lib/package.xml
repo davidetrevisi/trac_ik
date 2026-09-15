@@ -24,9 +24,14 @@
   <depend>geometry_msgs</depend>
   <depend>kdl_parser</depend>
   <depend>libnlopt-cxx-dev</depend>
+  <!-- This package includes <kdl/*.hpp> directly, so it declares KDL itself: kdl_parser 3.x
+       (rolling) dropped its own orocos_kdl_vendor dependency, which this used to inherit. -->
+  <depend>orocos_kdl_vendor</depend>
   <depend>pkg-config</depend>
   <depend>rclcpp</depend>
   <depend>urdf</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

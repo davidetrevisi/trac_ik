@@ -1,0 +1,616 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.1-17-g3c77eef-dirty  Build Version: 1.6.9605.22214
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="spx532_2_model">
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="0.0043269 -0.0065213 0.59655"
+        rpy="0 0 0" />
+      <mass
+        value="266.54" />
+      <inertia
+        ixx="141.53"
+        ixy="5.3377"
+        ixz="-0.27755"
+        iyy="185.81"
+        iyz="-0.54946"
+        izz="296.36" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.50196 0.50196 0.50196 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="turret_link">
+    <inertial>
+      <origin
+        xyz="-0.10614 0.1855 0.37731"
+        rpy="0 0 0" />
+      <mass
+        value="61.217" />
+      <inertia
+        ixx="4.776"
+        ixy="-0.0051831"
+        ixz="1.042"
+        iyy="7.2372"
+        iyz="-0.039855"
+        izz="8.4275" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.79216 0.81961 0.93333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="turret_rotation"
+    type="continuous">
+    <origin
+      xyz="0 0 0.9438"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="turret_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="0"
+      upper="3.14"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="main_boom_link">
+    <inertial>
+      <origin
+        xyz="0.656393497193518 0.134998349838861 0.00183169139770214"
+        rpy="0 0 0" />
+      <mass
+        value="31.4507072725992" />
+      <inertia
+        ixx="1.46470350239587"
+        ixy="-1.33050884381799"
+        ixz="-0.104584466596938"
+        iyy="21.8411882770522"
+        iyz="-0.0507436975051185"
+        izz="21.860508181293" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.9098 0.44314 0.031373 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="main_boom_lift"
+    type="revolute">
+    <origin
+      xyz="-0.84003 0 0.785"
+      rpy="1.5708 0 0" />
+    <parent
+      link="turret_link" />
+    <child
+      link="main_boom_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="0"
+      upper="1.396263"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="main_boom_ext_2_link">
+    <inertial>
+      <origin
+        xyz="-0.00184009275686129 0.19827656620228 -1.17087736324098"
+        rpy="0 0 0" />
+      <mass
+        value="9.49536652716039" />
+      <inertia
+        ixx="6.02273098278111"
+        ixy="0.00297992776028663"
+        ixz="0.0135888966116831"
+        iyy="5.94335698168467"
+        iyz="-0.0426253008192358"
+        izz="0.235349027323317" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.9098 0.44314 0.031373 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="main_boom_ext_2"
+    type="prismatic">
+    <origin
+      xyz="2.3515 0.047969 0"
+      rpy="0 1.5708 0" />
+    <parent
+      link="main_boom_link" />
+    <child
+      link="main_boom_ext_2_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="0"
+      upper="1.918"
+      effort="0"
+      velocity="0" />
+    <mimic
+      joint="main_boom_ext"
+      multiplier="1"
+      offset="0" />
+  </joint>
+  <link
+    name="main_boom_ext_3_link">
+    <inertial>
+      <origin
+        xyz="-0.00193851826527118 0.176059460924819 -1.10676120012178"
+        rpy="0 0 0" />
+      <mass
+        value="8.53748321957294" />
+      <inertia
+        ixx="5.48001023003627"
+        ixy="0.00279190147591973"
+        ixz="0.0142190465049087"
+        iyy="5.41729859915706"
+        iyz="-0.0701356032772845"
+        izz="0.176317371885191" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.909803921568627 0.443137254901961 0.0313725490196078 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="main_boom_ext_3"
+    type="prismatic">
+    <origin
+      xyz="0 0.0100798978887715 0.0905000000000005"
+      rpy="0 0 0" />
+    <parent
+      link="main_boom_ext_2_link" />
+    <child
+      link="main_boom_ext_3_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="0"
+      upper="1.918"
+      effort="0"
+      velocity="0" />
+    <mimic
+      joint="main_boom_ext"
+      multiplier="1"
+      offset="0" />
+  </joint>
+  <link
+    name="main_boom_ext_4_link">
+    <inertial>
+      <origin
+        xyz="0.000828342958786682 0.144744309820551 -1.18523822254442"
+        rpy="0 0 0" />
+      <mass
+        value="6.71697981634726" />
+      <inertia
+        ixx="4.15110358255813"
+        ixy="-0.000725464129663299"
+        ixz="-0.00549618583105041"
+        iyy="4.12085164201227"
+        iyz="-0.0300672784825823"
+        izz="0.0976994861725505" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.9098 0.44314 0.031373 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="main_boom_ext_4"
+    type="prismatic">
+    <origin
+      xyz="0 0.00961910803528465 0.0809999999999997"
+      rpy="0 0 0" />
+    <parent
+      link="main_boom_ext_3_link" />
+    <child
+      link="main_boom_ext_4_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="0"
+      upper="1.918"
+      effort="0"
+      velocity="0" />
+    <mimic
+      joint="main_boom_ext"
+      multiplier="1"
+      offset="0" />
+  </joint>
+  <link
+    name="main_boom_ext_link">
+    <inertial>
+      <origin
+        xyz="-0.824761238828145 0.223654260903277 0.00632082909501102"
+        rpy="0 0 0" />
+      <mass
+        value="7.79853404038618" />
+      <inertia
+        ixx="0.139872743684637"
+        ixy="-0.0213484314246036"
+        ixz="-0.0284110229908584"
+        iyy="4.52528059998734"
+        iyz="-0.0184651303812845"
+        izz="4.55834704000897" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.9098 0.44314 0.031373 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="main_boom_ext"
+    type="prismatic">
+    <origin
+      xyz="0 -0.0841154479560562 0.0856328197440972"
+      rpy="0 -1.5707963267949 0" />
+    <parent
+      link="main_boom_ext_4_link" />
+    <child
+      link="main_boom_ext_link" />
+    <axis
+      xyz="1 0 0" />
+    <limit
+      lower="0"
+      upper="1.918"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="jib_mounting_link">
+    <inertial>
+      <origin
+        xyz="0.10642772319665 0.0189950298373148 -2.39742035762192E-14"
+        rpy="0 0 0" />
+      <mass
+        value="4.46596108528191" />
+      <inertia
+        ixx="0.082383512143179"
+        ixy="0.0309611465737527"
+        ixz="-3.64307615374705E-17"
+        iyy="0.0597909496675865"
+        iyz="-1.31172228474473E-15"
+        izz="0.0993992141537392" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.50196 0.50196 0.50196 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="jib_mounting"
+    type="fixed">
+    <origin
+      xyz="0 0 0"
+      rpy="0 0 0" />
+    <parent
+      link="main_boom_ext_link" />
+    <child
+      link="jib_mounting_link" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="jib_lift_link">
+    <inertial>
+      <origin
+        xyz="0.53662 0.21757 0.032601"
+        rpy="0 0 0" />
+      <mass
+        value="9.9449" />
+      <inertia
+        ixx="0.13805"
+        ixy="-0.03392"
+        ixz="0.10784"
+        iyy="2.4017"
+        iyz="-0.0065415"
+        izz="2.3829" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.9098 0.44314 0.031373 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="jib_lift"
+    type="revolute">
+    <origin
+      xyz="0.174893674012891 0.0060994090100831 0"
+      rpy="0 0 0" />
+    <parent
+      link="jib_mounting_link" />
+    <child
+      link="jib_lift_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-3.1415"
+      upper="1.918"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="jib_ext_2_link">
+    <inertial>
+      <origin
+        xyz="2.5679E-06 0.10121 -0.81255"
+        rpy="0 0 0" />
+      <mass
+        value="3.1771" />
+      <inertia
+        ixx="0.84282"
+        ixy="2.823E-07"
+        ixz="2.648E-06"
+        iyy="0.83592"
+        iyz="0.0035833"
+        izz="0.02413" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.9098 0.44314 0.031373 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="jib_ext_2"
+    type="prismatic">
+    <origin
+      xyz="1.7357 0.12434 0"
+      rpy="0 1.5708 0" />
+    <parent
+      link="jib_lift_link" />
+    <child
+      link="jib_ext_2_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="0"
+      upper="1.918"
+      effort="0"
+      velocity="0" />
+    <mimic
+      joint="jib_ext"
+      multiplier="1"
+      offset="0" />
+  </joint>
+  <link
+    name="jib_ext_link">
+    <inertial>
+      <origin
+        xyz="5.1827E-09 0.079187 -0.67876"
+        rpy="0 0 0" />
+      <mass
+        value="2.8581" />
+      <inertia
+        ixx="0.7156"
+        ixy="2.1017E-08"
+        ixz="-1.4713E-10"
+        iyy="0.7115"
+        iyz="0.013865"
+        izz="0.014769" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.9098 0.44314 0.031373 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <box size="0.1 0.1 0.1" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="jib_ext"
+    type="prismatic">
+    <origin
+      xyz="0 0.0105 0.0543"
+      rpy="0 0 0" />
+    <parent
+      link="jib_ext_2_link" />
+    <child
+      link="jib_ext_link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="0"
+      upper="1.370"
+      effort="0"
+      velocity="0" />
+  </joint>
+</robot>

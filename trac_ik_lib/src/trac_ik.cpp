@@ -34,7 +34,15 @@ OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rclcpp/rclcpp.hpp>
 #include <limits>
 #include <kdl_parser/kdl_parser.hpp>
+// Jazzy's urdf 2.10.1 has no <urdf/model.hpp>; on Kilted and Rolling <urdf/model.h> is a shim that
+// warns. Delete this guard, keeping the .hpp, when Jazzy reaches EOL (May 2029) -- or sooner, with
+// the code it serves: only files that parse a URDF file keep it, and the URDF-reading code here is
+// deleted by the tickets that take couplings and joint limits from MoveIt's robot model.
+#if __has_include(<urdf/model.hpp>)
 #include <urdf/model.hpp>
+#else
+#include <urdf/model.h>
+#endif
 
 namespace TRAC_IK
 {

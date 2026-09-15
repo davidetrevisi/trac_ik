@@ -1,0 +1,81 @@
+<?xml version="1.0"?>
+<!-- PROTOTYPE FIXTURE (wayfinder ticket 22). A redundant 7R arm: one genuine degree of self-motion
+     against a full-pose goal, so the 6x7 Jacobian has a one-dimensional null space everywhere away
+     from singularities. Exists because every solver decision in the map was measured on the crane
+     (rank-deficient, 5 active DOF) or arm6 (square 6x6) and TRAC-IK's own audience is redundant
+     arms. Shoulder j1/j2/j3 and wrist j5/j6/j7 are near-spherical, j4 is the elbow; four joints are
+     continuous and three are bounded, one of them asymmetrically. Box geometry only, no meshes,
+     not a model of any real robot. -->
+<robot name="arm7">
+  <link name="base_link">
+    <inertial><mass value="1.0"/><inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial>
+    <visual><geometry><box size="0.2 0.2 0.1"/></geometry></visual>
+  </link>
+
+  <link name="shoulder_link">
+    <inertial><mass value="1.0"/><inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial>
+    <visual><geometry><box size="0.12 0.12 0.1"/></geometry></visual>
+  </link>
+  <joint name="j1" type="continuous">
+    <parent link="base_link"/><child link="shoulder_link"/>
+    <origin xyz="0 0 0.1" rpy="0 0 0"/><axis xyz="0 0 1"/>
+  </joint>
+
+  <link name="shoulder_tilt_link">
+    <inertial><mass value="1.0"/><inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial>
+    <visual><geometry><box size="0.12 0.12 0.1"/></geometry></visual>
+  </link>
+  <joint name="j2" type="revolute">
+    <parent link="shoulder_link"/><child link="shoulder_tilt_link"/>
+    <origin xyz="0 0 0.1" rpy="0 0 0"/><axis xyz="0 1 0"/>
+    <limit lower="-2.0" upper="2.0" effort="100" velocity="2.0"/>
+  </joint>
+
+  <link name="upper_arm_link">
+    <inertial><mass value="1.0"/><inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial>
+    <visual><geometry><box size="0.1 0.1 0.3"/></geometry></visual>
+  </link>
+  <joint name="j3" type="continuous">
+    <parent link="shoulder_tilt_link"/><child link="upper_arm_link"/>
+    <origin xyz="0 0 0.0" rpy="0 0 0"/><axis xyz="0 0 1"/>
+  </joint>
+
+  <link name="forearm_link">
+    <inertial><mass value="1.0"/><inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial>
+    <visual><geometry><box size="0.1 0.1 0.3"/></geometry></visual>
+  </link>
+  <!-- The elbow: bounded, asymmetric and one-sided, the way a real arm's is. -->
+  <joint name="j4" type="revolute">
+    <parent link="upper_arm_link"/><child link="forearm_link"/>
+    <origin xyz="0 0 0.3" rpy="0 0 0"/><axis xyz="0 1 0"/>
+    <limit lower="-2.7" upper="-0.1" effort="100" velocity="2.0"/>
+  </joint>
+
+  <link name="wrist_1_link">
+    <inertial><mass value="0.5"/><inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial>
+    <visual><geometry><box size="0.08 0.08 0.08"/></geometry></visual>
+  </link>
+  <joint name="j5" type="continuous">
+    <parent link="forearm_link"/><child link="wrist_1_link"/>
+    <origin xyz="0 0 0.3" rpy="0 0 0"/><axis xyz="0 0 1"/>
+  </joint>
+
+  <link name="wrist_2_link">
+    <inertial><mass value="0.5"/><inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial>
+    <visual><geometry><box size="0.08 0.08 0.08"/></geometry></visual>
+  </link>
+  <joint name="j6" type="revolute">
+    <parent link="wrist_1_link"/><child link="wrist_2_link"/>
+    <origin xyz="0 0 0.1" rpy="0 0 0"/><axis xyz="0 1 0"/>
+    <limit lower="-2.0" upper="2.0" effort="50" velocity="2.0"/>
+  </joint>
+
+  <link name="tool_link">
+    <inertial><mass value="0.2"/><inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/></inertial>
+    <visual><geometry><box size="0.05 0.05 0.05"/></geometry></visual>
+  </link>
+  <joint name="j7" type="continuous">
+    <parent link="wrist_2_link"/><child link="tool_link"/>
+    <origin xyz="0 0 0.08" rpy="0 0 0"/><axis xyz="0 0 1"/>
+  </joint>
+</robot>

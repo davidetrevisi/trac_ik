@@ -18,6 +18,10 @@
   <depend>tf2_kdl</depend>
   <depend>trac_ik_lib</depend>
 
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>srdfdom</test_depend>
+  <test_depend>tf2_eigen</test_depend>
+
   <export>
     <build_type>ament_cmake</build_type>
     <moveit_core plugin="${prefix}/trac_ik_kinematics_description.xml"/>

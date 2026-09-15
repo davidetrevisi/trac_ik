@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<!-- PROTOTYPE FIXTURE (wayfinder ticket 22). Companion SRDF for arm7.urdf. -->
+<robot name="arm7">
+  <group name="arm">
+    <chain base_link="base_link" tip_link="tool_link"/>
+  </group>
+  <group_state name="home" group="arm">
+    <joint name="j1" value="0"/><joint name="j2" value="0"/><joint name="j3" value="0"/>
+    <joint name="j4" value="-1.4"/><joint name="j5" value="0"/><joint name="j6" value="0"/>
+    <joint name="j7" value="0"/>
+  </group_state>
+</robot>
