@@ -119,6 +119,28 @@ public:
     return couplings_[i].mimicked_index >= 0;
   }
 
+  /// True when at least one mimic joint follows this one. Distinct from isMimic: a mimicked joint is
+  /// active, and it is the joint whose value a coupling reads.
+  bool isMimicked(unsigned int i) const
+  {
+    // Bounds-checked, so a rejected description answers "no" like every other operation here
+    // answers with a no-op, rather than reading a vector it never built.
+    return i < mimicked_.size() && mimicked_[i];
+  }
+
+  /// Any per-chain-joint fact, restricted to the active joints -- the reduced counterpart of a full
+  /// vector. Joint type is what this library reduces through it: a joint's type and its coupling are
+  /// independent facts, so the type stays where it is and is restricted here rather than folded in.
+  template<typename T>
+  std::vector<T> reduceVector(const std::vector<T>& full) const
+  {
+    std::vector<T> out;
+    out.reserve(active_.size());
+    for (const unsigned int i : active_)
+      out.push_back(full[i]);
+    return out;
+  }
+
   const JointCoupling& coupling(unsigned int i) const
   {
     return couplings_[i];
@@ -163,6 +185,9 @@ private:
 
   std::vector<JointCoupling> couplings_;
   std::vector<unsigned int> active_;
+  /// Whether each chain joint is followed by at least one mimic joint. All false on an uncoupled
+  /// chain, and on a rejected description, where nothing may be trusted.
+  std::vector<bool> mimicked_;
   /// Reduced index of each chain joint: its own for an active joint, its mimicked joint's for a
   /// mimic joint. Empty when the value is invalid.
   std::vector<unsigned int> reduced_index_;

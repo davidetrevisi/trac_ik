@@ -80,8 +80,8 @@ void TRAC_IK::configureSolvers(const Query& query)
 
   solver_lb = query.q_min;
   solver_ub = query.q_max;
-  nl_solver.reset(new NLOPT_IK::NLOPT_IK(chain, query.q_min, query.q_max, query.timeout, query.epsilon, logger));
-  iksolver.reset(new KDL::ChainIkSolverPos_TL(chain, query.q_min, query.q_max, query.timeout, query.epsilon, true, true));
+  nl_solver.reset(new NLOPT_IK::NLOPT_IK(chain, query.q_min, query.q_max, couplings, query.timeout, query.epsilon, logger));
+  iksolver.reset(new KDL::ChainIkSolverPos_TL(chain, query.q_min, query.q_max, couplings, query.timeout, query.epsilon, true, true));
 }
 
 void TRAC_IK::classifyJoints(const KDL::JntArray& q_min, const KDL::JntArray& q_max)
@@ -265,11 +265,15 @@ bool TRAC_IK::runSolver(T1& solver, T2& other_solver,
     if (!solutions.empty() && query.solve_type == Speed)
       break;
 
-    for (unsigned int j = 0; j < seed.data.size(); j++)
+    // Resample the joints the solver chooses, then rebuild the rest: a random FULL configuration
+    // would start every restart off the couplings, and the branch would spend the restart walking
+    // back onto them.
+    for (const uint j : couplings.activeIndices())
       if (types[j] == KDL::BasicJointType::Continuous)
         seed(j) = fRand(q_init(j) - 2 * M_PI, q_init(j) + 2 * M_PI);
       else
         seed(j) = fRand(query.q_min(j), query.q_max(j));
+    rebuildMimicEntries(seed);
   }
   other_solver.abort();
 
@@ -279,13 +283,49 @@ bool TRAC_IK::runSolver(T1& solver, T2& other_solver,
 }
 
 
+KDL::JntArray TRAC_IK::repairSeed(const KDL::JntArray& q_init, const Query& query) const
+{
+  KDL::JntArray seed = q_init;
+
+  // Only the joints a coupling reads are clamped. An active joint nothing follows is left exactly
+  // as the caller gave it, so an uncoupled chain gets the seed it always got, and the two inner
+  // solvers keep their own, better-informed handling of an out-of-range seed (NLopt wraps a
+  // rotational one into range rather than clipping it).
+  for (const uint i : couplings.activeIndices())
+  {
+    if (!couplings.isMimicked(i) || types[i] == KDL::BasicJointType::Continuous)
+      continue;
+    const double clamped = std::min(std::max(seed(i), query.q_min(i)), query.q_max(i));
+    if (clamped != seed(i))
+    {
+      RCLCPP_DEBUG(logger, "Seed value %f for joint %d is outside the bounds its couplings leave it "
+                   "[%f, %f]; clamped to %f", seed(i), (int)i, query.q_min(i), query.q_max(i), clamped);
+      seed(i) = clamped;
+    }
+  }
+
+  rebuildMimicEntries(seed);
+  return seed;
+}
+
+
+void TRAC_IK::rebuildMimicEntries(KDL::JntArray& full) const
+{
+  // reduce-then-expand: the mimic entries are dropped and written back from the joints they follow,
+  // which is the whole repair -- a full configuration's mimic entries are never read.
+  KDL::JntArray reduced;
+  couplings.reduce(full, reduced);
+  couplings.expand(reduced, full);
+}
+
+
 void TRAC_IK::normalize_seed(const KDL::JntArray& seed, KDL::JntArray& solution,
                              const KDL::JntArray& q_min, const KDL::JntArray& q_max)
 {
   // Make sure rotational joint values are within 1 revolution of seed; then
   // ensure joint limits are met.
 
-  for (uint i = 0; i < q_min.data.size(); i++)
+  for (const uint i : couplings.activeIndices())
   {
 
     if (types[i] == KDL::BasicJointType::TransJoint)
@@ -306,6 +346,8 @@ void TRAC_IK::normalize_seed(const KDL::JntArray& seed, KDL::JntArray& solution,
 
     solution(i) = val;
   }
+
+  rebuildMimicEntries(solution);
 }
 
 void TRAC_IK::normalize_limits(const KDL::JntArray& seed, KDL::JntArray& solution,
@@ -314,7 +356,7 @@ void TRAC_IK::normalize_limits(const KDL::JntArray& seed, KDL::JntArray& solutio
   // Make sure rotational joint values are within 1 revolution of middle of
   // limits; then ensure joint limits are met.
 
-  for (uint i = 0; i < q_min.data.size(); i++)
+  for (const uint i : couplings.activeIndices())
   {
 
     if (types[i] == KDL::BasicJointType::TransJoint)
@@ -340,6 +382,7 @@ void TRAC_IK::normalize_limits(const KDL::JntArray& seed, KDL::JntArray& solutio
     solution(i) = val;
   }
 
+  rebuildMimicEntries(solution);
 }
 
 
@@ -436,6 +479,9 @@ int TRAC_IK::CartToJnt(const KDL::JntArray &q_init, const KDL::Frame &p_in, KDL:
   configureSolvers(resolved);
   classifyJoints(resolved.q_min, resolved.q_max);
 
+  // One seed both branches start from, and the only place the caller's configuration is repaired.
+  const KDL::JntArray seed = repairSeed(q_init, resolved);
+
   start_time = system_clock.now();
 
   nl_solver->reset();
@@ -446,8 +492,8 @@ int TRAC_IK::CartToJnt(const KDL::JntArray &q_init, const KDL::Frame &p_in, KDL:
   errors.clear();
 
   // cref, not a copy: the query lives on this stack frame and both threads are joined below.
-  task1 = std::thread(&TRAC_IK::runKDL, this, std::cref(resolved), q_init, p_in);
-  task2 = std::thread(&TRAC_IK::runNLOPT, this, std::cref(resolved), q_init, p_in);
+  task1 = std::thread(&TRAC_IK::runKDL, this, std::cref(resolved), seed, p_in);
+  task2 = std::thread(&TRAC_IK::runNLOPT, this, std::cref(resolved), seed, p_in);
 
   if (task1.joinable())
       task1.join();

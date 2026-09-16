@@ -138,9 +138,10 @@ public:
    * The candidates the last call collected, with the key each was ranked by.
    *
    * Each pair is (ordering key, index into solutions_). The key is NOT a distance in general: under
-   * Speed and Distance it is the squared joint distance from the seed and smaller is better, while
-   * under the Manip solve types it is a manipulability score and larger is better. Both orderings
-   * put the returned solution first, which is the only thing a caller can rely on across types.
+   * Speed and Distance it is the squared joint distance from the seed -- measured over the active
+   * joints, see JointErr -- and smaller is better, while under the Manip solve types it is a
+   * manipulability score and larger is better. Both orderings put the returned solution first,
+   * which is the only thing a caller can rely on across types.
    */
   bool getSolutions(std::vector<KDL::JntArray>& solutions_, std::vector<std::pair<double, uint> >& errors_)
   {
@@ -148,10 +149,17 @@ public:
     return getSolutions(solutions_);
   }
 
-  static double JointErr(const KDL::JntArray& arr1, const KDL::JntArray& arr2)
+  /**
+   * Squared joint distance between two full configurations: one term per joint the solver actually
+   * chose. A mimic entry is a function of its mimicked joint's, so counting it would weight the
+   * crane's four-stage telescope four times over and rank candidates by the shape of the mechanism
+   * rather than by how far they are from the seed. The square root is left to whoever displays the
+   * number; the ordering is the same either way.
+   */
+  double JointErr(const KDL::JntArray& arr1, const KDL::JntArray& arr2) const
   {
     double err = 0;
-    for (uint i = 0; i < arr1.data.size(); i++)
+    for (const uint i : couplings.activeIndices())
     {
       err += pow(arr1(i) - arr2(i), 2);
     }
@@ -159,6 +167,13 @@ public:
     return err;
   }
 
+  /**
+   * One IK query. Seed and solution are FULL configurations, mimic joints included; the search
+   * inside runs on the reduced one, so a solution satisfies the couplings exactly and a caller
+   * never has to know that the reduction happened.
+   *
+   * The seed is repaired rather than trusted: see repairSeed.
+   */
   int CartToJnt(const KDL::JntArray &q_init, const KDL::Frame &p_in, KDL::JntArray &q_out, const Query& query = Query());
 
 private:
@@ -196,10 +211,26 @@ private:
   bool runKDL(const Query& query, const KDL::JntArray &q_init, const KDL::Frame &p_in);
   bool runNLOPT(const Query& query, const KDL::JntArray &q_init, const KDL::Frame &p_in);
 
+  // Both normalise the joints the solver chose and then rebuild the mimic entries: normalising a
+  // mimic entry on its own -- by a revolution, or into its own bounds -- takes it off its coupling.
   void normalize_seed(const KDL::JntArray& seed, KDL::JntArray& solution,
                       const KDL::JntArray& q_min, const KDL::JntArray& q_max);
   void normalize_limits(const KDL::JntArray& seed, KDL::JntArray& solution,
                         const KDL::JntArray& q_min, const KDL::JntArray& q_max);
+
+  /// Recompute a full configuration's mimic entries from their mimicked joints, in place.
+  void rebuildMimicEntries(KDL::JntArray& full) const;
+
+  /**
+   * The seed the solve actually starts from: the caller's, with each mimicked joint clamped into
+   * the bounds in force and every mimic entry recomputed from the joint it follows.
+   *
+   * A seed is a full configuration and a caller may hand one the mechanism cannot hold -- MoveIt's
+   * current state, read back after something else moved a mimic joint, is exactly that. Repairing
+   * it is not optional: the reduction reads the mimicked joint and would otherwise carry a value
+   * outside the couplings' reach into every restart.
+   */
+  KDL::JntArray repairSeed(const KDL::JntArray& q_init, const Query& query) const;
 
   /// Rotational or translational, from the chain's segments. Fixed by the mechanism.
   std::vector<KDL::BasicJointType> kinds;

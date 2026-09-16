@@ -44,11 +44,23 @@ class NLOPT_IK
 {
   friend class TRAC_IK::TRAC_IK;
 public:
-  NLOPT_IK(const KDL::Chain& _chain, const KDL::JntArray& _q_min, const KDL::JntArray& _q_max, double _maxtime = 0.005, double _eps = 1e-3, const rclcpp::Logger& _logger = rclcpp::get_logger("trac_ik.trac_ik_lib"));
+  /**
+   * The bounds are the EFFECTIVE ones and the couplings describe the chain they were tightened
+   * through; an empty description means an uncoupled chain, which reduces to itself.
+   */
+  NLOPT_IK(const KDL::Chain& _chain, const KDL::JntArray& _q_min, const KDL::JntArray& _q_max,
+           const TRAC_IK::JointCouplings& _couplings = TRAC_IK::JointCouplings(),
+           double _maxtime = 0.005, double _eps = 1e-3,
+           const rclcpp::Logger& _logger = rclcpp::get_logger("trac_ik.trac_ik_lib"));
 
   ~NLOPT_IK() {};
+
+  /// Seed and solution are FULL configurations; the decision vector inside is the reduced one, so
+  /// the couplings hold by construction rather than by an equality constraint the optimiser has to
+  /// satisfy -- and the search is over as many variables as the mechanism actually has.
   int CartToJnt(const KDL::JntArray& q_init, const KDL::Frame& p_in, KDL::JntArray& q_out, const KDL::Twist bounds = KDL::Twist::Zero());
 
+  /// `x` is a reduced configuration: the objective expands it before forward kinematics.
   void cartSumSquaredError(const std::vector<double>& x, double error[]);
 
   inline void setMaxtime(double t)
@@ -76,10 +88,14 @@ private:
   rclcpp::Logger logger_;
   rclcpp::Clock system_clock;
 
+  /// Reduced, like the decision vector they bound.
   std::vector<double> lb;
   std::vector<double> ub;
 
   const KDL::Chain chain;
+  TRAC_IK::JointCouplings couplings;
+  /// The objective's expand() target, held rather than allocated per iteration.
+  KDL::JntArray q_full;
 
   KDL::ChainFkSolverPos_recursive fksolver;
 
@@ -88,12 +104,14 @@ private:
 
   KDL::Frame targetPose;
 
+  /// Reduced, to match lb, ub and the decision vector.
   std::vector<KDL::BasicJointType> types;
 
   nlopt::opt opt;
 
   KDL::Frame currentPose;
 
+  /// The best reduced configuration the solve has visited; CartToJnt expands it into the solution.
   std::vector<double> best_x;
   int progress;
   bool aborted;

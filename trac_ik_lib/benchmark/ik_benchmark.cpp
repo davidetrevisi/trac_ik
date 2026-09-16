@@ -12,10 +12,11 @@
 //   - solve rate is verified by FK against the query's tolerance bounds, never taken from the return code,
 //     and is reported beside the realisable rate: solved *and* every joint coupling actually satisfied.
 //
-// Written against the library as it stands today: joint couplings are handled *here* (the library treats
-// mimic joints as independent, ticket 04), unbounded joints still use the float-max sentinel (ticket 08),
-// and per-call parameters still arrive through the constructor (ticket 06). When those land, this tool
-// changes with them; the protocol above does not.
+// Written against the library as it stands today: the library is told how the chain is coupled and searches
+// in reduced space (tickets 04, 05), so the couplings are built here only to generate samples and to check
+// answers -- KDL's own ChainIkSolverPos_NR_JL, the comparison row, still knows nothing about them, which is
+// what the realisable column is for. Unbounded joints still use the float-max sentinel (ticket 08). When
+// that lands, this tool changes with it; the protocol above does not.
 
 #include <kdl/chainfksolverpos_recursive.hpp>
 #include <kdl/chainiksolverpos_nr_jl.hpp>
@@ -127,6 +128,8 @@ struct Mechanism
   std::vector<std::string> joint_names;   // chain order, movable joints only
   std::vector<Coupling> couplings;
   std::vector<unsigned int> active;       // chain indices that are not mimic joints
+  TRAC_IK::JointCouplings joint_couplings;  // the same couplings, in the form the library takes
+  KDL::JntArray eff_lb, eff_ub;             // the bounds tightened through them
 
   Mechanism(const std::string& urdf_file, const std::string& base, const std::string& tip)
     : urdf_path(urdf_file)
@@ -196,6 +199,32 @@ struct Mechanism
     for (unsigned int k = 0; k < joint_names.size(); ++k)
       if (std::none_of(couplings.begin(), couplings.end(), [k](const Coupling& c) { return c.mimic == k; }))
         active.push_back(k);
+
+    // The same description, in the form the library takes. TRAC_IK tightens the bounds itself; the two
+    // inner solvers are handed effective bounds because that is what they are documented to take.
+    std::vector<TRAC_IK::JointCoupling> description(n);
+    for (unsigned int k = 0; k < joint_names.size(); ++k)
+      description[k].name = joint_names[k];
+    for (const auto& c : couplings)
+    {
+      description[c.mimic].mimicked_index = static_cast<int>(c.mimicked);
+      description[c.mimic].multiplier = c.multiplier;
+      description[c.mimic].offset = c.offset;
+    }
+    joint_couplings = TRAC_IK::JointCouplings(description);
+    if (!joint_couplings.valid())
+    {
+      std::fprintf(stderr, "%s: %s\n", urdf_file.c_str(), joint_couplings.error().c_str());
+      std::exit(2);
+    }
+    eff_lb = lb;
+    eff_ub = ub;
+    std::string why;
+    if (!joint_couplings.tighten(eff_lb, eff_ub, why))
+    {
+      std::fprintf(stderr, "%s: %s\n", urdf_file.c_str(), why.c_str());
+      std::exit(2);
+    }
   }
 
   bool unbounded(unsigned int i) const
@@ -361,9 +390,9 @@ std::vector<Outcome> run(Solver which, const Mechanism& m, const Query& q,
   KDL::ChainFkSolverPos_recursive fk(m.chain);
   KDL::ChainIkSolverVel_pinv vik(m.chain);
   KDL::ChainIkSolverPos_NR_JL nr_jl(m.chain, m.lb, m.ub, fk, vik, kNrJlMaxIter, q.epsilon);
-  KDL::ChainIkSolverPos_TL kdl_tl(m.chain, m.lb, m.ub, q.timeout, q.epsilon, true, true);
-  NLOPT_IK::NLOPT_IK nlopt(m.chain, m.lb, m.ub, q.timeout, q.epsilon, logger);
-  TRAC_IK::TRAC_IK trac_ik(m.chain, m.lb, m.ub, TRAC_IK::JointCouplings(), logger);
+  KDL::ChainIkSolverPos_TL kdl_tl(m.chain, m.eff_lb, m.eff_ub, m.joint_couplings, q.timeout, q.epsilon, true, true);
+  NLOPT_IK::NLOPT_IK nlopt(m.chain, m.eff_lb, m.eff_ub, m.joint_couplings, q.timeout, q.epsilon, logger);
+  TRAC_IK::TRAC_IK trac_ik(m.chain, m.lb, m.ub, m.joint_couplings, logger);
 
   std::vector<Outcome> out;
   out.reserve(samples.size());
@@ -467,24 +496,24 @@ void runMicro(const Mechanism& m, const Query& q, int reps)
   {
     {
       const auto t0 = Clock::now();
-      TRAC_IK::TRAC_IK ik(m.chain, m.lb, m.ub, TRAC_IK::JointCouplings(), logger);
+      TRAC_IK::TRAC_IK ik(m.chain, m.lb, m.ub, m.joint_couplings, logger);
       whole.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
     }
     {
       const auto t0 = Clock::now();
       {
-        TRAC_IK::TRAC_IK ik(m.chain, m.lb, m.ub, TRAC_IK::JointCouplings(), logger);
+        TRAC_IK::TRAC_IK ik(m.chain, m.lb, m.ub, m.joint_couplings, logger);
       }
       whole_dtor.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
     }
     {
       const auto t0 = Clock::now();
-      NLOPT_IK::NLOPT_IK n(m.chain, m.lb, m.ub, q.timeout, q.epsilon, logger);
+      NLOPT_IK::NLOPT_IK n(m.chain, m.eff_lb, m.eff_ub, m.joint_couplings, q.timeout, q.epsilon, logger);
       nlo.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
     }
     {
       const auto t0 = Clock::now();
-      KDL::ChainIkSolverPos_TL s(m.chain, m.lb, m.ub, q.timeout, q.epsilon, true, true);
+      KDL::ChainIkSolverPos_TL s(m.chain, m.eff_lb, m.eff_ub, m.joint_couplings, q.timeout, q.epsilon, true, true);
       tl.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
     }
     {

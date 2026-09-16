@@ -33,9 +33,13 @@ OF THE POSSIBILITY OF SUCH DAMAGE.
 #define KDLCHAINIKSOLVERPOS_TL_HPP
 
 #include <kdl/chainfksolverpos_recursive.hpp>
-#include <kdl/chainiksolvervel_pinv.hpp>
+#include <kdl/chainjnttojacsolver.hpp>
 #include <rclcpp/clock.hpp>
+#include <trac_ik/joint_coupling.hpp>
+#include <kdl/utilities/svd_eigen_HH.hpp>
+#include <Eigen/Core>
 #include <cmath>
+#include <vector>
 
 namespace TRAC_IK
 {
@@ -52,10 +56,19 @@ class ChainIkSolverPos_TL
   friend class TRAC_IK::TRAC_IK;
 
 public:
-  ChainIkSolverPos_TL(const Chain& chain, const JntArray& q_min, const JntArray& q_max, double maxtime = 0.005, double eps = 1e-3, bool random_restart = false, bool try_jl_wrap = false);
+  /**
+   * The bounds are the EFFECTIVE ones and the couplings describe the chain they were tightened
+   * through; an empty description means an uncoupled chain, which reduces to itself.
+   */
+  ChainIkSolverPos_TL(const Chain& chain, const JntArray& q_min, const JntArray& q_max,
+                      const TRAC_IK::JointCouplings& couplings = TRAC_IK::JointCouplings(),
+                      double maxtime = 0.005, double eps = 1e-3, bool random_restart = false,
+                      bool try_jl_wrap = false);
 
   ~ChainIkSolverPos_TL();
 
+  /// Seed and solution are FULL configurations; the Newton loop inside runs on the reduced one, so
+  /// a solution's mimic entries are computed from their mimicked joints rather than searched for.
   int CartToJnt(const KDL::JntArray& q_init, const KDL::Frame& p_in, KDL::JntArray& q_out, const KDL::Twist bounds = KDL::Twist::Zero());
 
   inline void setMaxtime(double t)
@@ -70,14 +83,14 @@ public:
 
 private:
   const Chain chain;
-  JntArray q_min;
-  JntArray q_max;
+  TRAC_IK::JointCouplings couplings;
+  /// The effective bounds, restricted to the joints this solver actually chooses.
+  JntArray q_min, q_max;
 
   KDL::Twist bounds;
 
-  KDL::ChainIkSolverVel_pinv vik_solver;
+  KDL::ChainJntToJacSolver jacsolver;
   KDL::ChainFkSolverPos_recursive fksolver;
-  JntArray delta_q;
   double maxtime;
 
   double eps;
@@ -85,7 +98,27 @@ private:
   bool rr;
   bool wrap;
 
+  /// Reduced, to match the bounds and the state below. A joint's type is a fact about the joint, so
+  /// it is read off the full chain and then restricted, rather than derived from the reduction.
   std::vector<KDL::BasicJointType> types;
+
+  /// The Newton loop's state and its scratch. A reduced configuration is what the loop steps; the
+  /// full one is materialised only for forward kinematics and the Jacobian.
+  JntArray q, q_curr, q_full;
+  Jacobian jac;
+  Eigen::MatrixXd jac_reduced;
+  Eigen::VectorXd delta_q;
+  /// Sized once: this runs every Newton iteration, and an SVD allocating per call would show.
+  Eigen::MatrixXd svd_u, svd_v;
+  Eigen::VectorXd svd_s, svd_tmp, svd_rhs;
+
+  /**
+   * The velocity step, over the reduced Jacobian: a truncated SVD pseudo-inverse, at KDL's own 1e-6
+   * cutoff. KDL has no coupled velocity solver and MoveIt's ChainIkSolverVelMimicSVD ships no
+   * exported link target, so this is ours; on an uncoupled chain it is a plain pseudo-inverse, and
+   * measured faster than the KDL::ChainIkSolverVel_pinv it replaces on arm6, arm7 and the crane.
+   */
+  void reducedVelocityStep(const Eigen::MatrixXd& jacobian, const Twist& twist, Eigen::VectorXd& qdot);
 
   inline void abort()
   {

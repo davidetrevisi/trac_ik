@@ -204,7 +204,7 @@ TEST(TracIkPlugin, SolverJointListIsEveryChainJointWithVariables)
 
 TEST(TracIkPlugin, CraneSolutionSurvivesMimicReimposition)
 {
-  GTEST_SKIP() << "measures the mimic coupling defect; delete this skip in ticket 05";
+  GTEST_SKIP() << "measures the mimic coupling defect; delete this skip in ticket 06";
 
   auto model = loadModel("crane.urdf", "crane.srdf");
   auto node = makeNode(CraneCase::kGroup, {rclcpp::Parameter("solve_type", "Distance")});
@@ -231,7 +231,7 @@ TEST(TracIkPlugin, CraneSolutionSurvivesMimicReimposition)
 
 TEST(TracIkPlugin, CraneSolutionRespectsMimicCoupling)
 {
-  GTEST_SKIP() << "measures the mimic coupling defect; delete this skip in ticket 05";
+  GTEST_SKIP() << "measures the mimic coupling defect; delete this skip in ticket 06";
 
   auto model = loadModel("crane.urdf", "crane.srdf");
   // TRAP, pinned deliberately: solve_type Distance, not the shipped default. In Speed mode the KDL

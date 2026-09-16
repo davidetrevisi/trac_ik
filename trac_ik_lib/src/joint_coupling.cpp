@@ -92,6 +92,7 @@ JointCouplings::JointCouplings(unsigned int chain_joints)
 {
   active_.reserve(chain_joints);
   reduced_index_.resize(chain_joints);
+  mimicked_.assign(chain_joints, false);
   for (unsigned int i = 0; i < chain_joints; ++i)
   {
     reduced_index_[i] = static_cast<unsigned int>(active_.size());
@@ -148,6 +149,10 @@ JointCouplings::JointCouplings(const std::vector<JointCoupling>& description)
     return;
 
   reduced_index_.resize(n);
+  mimicked_.assign(n, false);
+  for (unsigned int i = 0; i < n; ++i)
+    if (isMimic(i))
+      mimicked_[couplings_[i].mimicked_index] = true;
   for (unsigned int i = 0; i < n; ++i)
     if (!isMimic(i))
     {

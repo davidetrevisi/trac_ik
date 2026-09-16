@@ -72,44 +72,55 @@ double minfuncSumSquared(const std::vector<double>& x, std::vector<double>& grad
 }
 
 
-NLOPT_IK::NLOPT_IK(const KDL::Chain& _chain, const KDL::JntArray& _q_min, const KDL::JntArray& _q_max, double _maxtime, double _eps, const rclcpp::Logger& _logger):
-  logger_(_logger), chain(_chain), fksolver(chain), maxtime(_maxtime), eps(std::abs(_eps))
+NLOPT_IK::NLOPT_IK(const KDL::Chain& _chain, const KDL::JntArray& _q_min, const KDL::JntArray& _q_max,
+                   const TRAC_IK::JointCouplings& _couplings, double _maxtime, double _eps,
+                   const rclcpp::Logger& _logger):
+  logger_(_logger), chain(_chain),
+  couplings(_couplings.size() == 0 ? TRAC_IK::JointCouplings(_chain.getNrOfJoints()) : _couplings),
+  q_full(_chain.getNrOfJoints()), fksolver(chain), maxtime(_maxtime), eps(std::abs(_eps))
 {
   assert(chain.getNrOfJoints() == _q_min.data.size());
   assert(chain.getNrOfJoints() == _q_max.data.size());
+  assert(chain.getNrOfJoints() == couplings.size());
 
   //Constructor for an IK Class.  Takes in a Chain to operate on,
   //the min and max joint limits, an (optional) maximum number of
   //iterations, and an (optional) desired error.
   reset();
 
-  if (chain.getNrOfJoints() < 2)
+  // Active joints, not chain joints: a chain of nine whose couplings leave one free is a
+  // one-variable problem, whatever its length suggests.
+  if (couplings.reducedSize() < 2)
   {
     RCLCPP_WARN_THROTTLE(logger_, system_clock, 1000.0, "NLOpt_IK can only be run for chains of length 2 or more");
     return;
   }
-  opt = nlopt::opt(nlopt::LD_SLSQP, _chain.getNrOfJoints());
+  // The decision vector IS the reduced configuration. Enforcing the couplings by reducing what the
+  // optimiser may choose is exact and costs nothing; an equality constraint would be neither.
+  opt = nlopt::opt(nlopt::LD_SLSQP, couplings.reducedSize());
 
-  for (uint i = 0; i < chain.getNrOfJoints(); i++)
+  for (const uint i : couplings.activeIndices())
   {
     lb.push_back(_q_min(i));
     ub.push_back(_q_max(i));
   }
 
+  std::vector<KDL::BasicJointType> full_types;
   for (uint i = 0; i < chain.segments.size(); i++)
   {
     std::string type = chain.segments[i].getJoint().getTypeName();
     if (type.find("Rot") != std::string::npos)
     {
-      if (_q_max(types.size()) >= std::numeric_limits<float>::max() &&
-          _q_min(types.size()) <= std::numeric_limits<float>::lowest())
-        types.push_back(KDL::BasicJointType::Continuous);
+      if (_q_max(full_types.size()) >= std::numeric_limits<float>::max() &&
+          _q_min(full_types.size()) <= std::numeric_limits<float>::lowest())
+        full_types.push_back(KDL::BasicJointType::Continuous);
       else
-        types.push_back(KDL::BasicJointType::RotJoint);
+        full_types.push_back(KDL::BasicJointType::RotJoint);
     }
     else if (type.find("Trans") != std::string::npos)
-      types.push_back(KDL::BasicJointType::TransJoint);
+      full_types.push_back(KDL::BasicJointType::TransJoint);
   }
+  types = couplings.reduceVector(full_types);
 
   assert(types.size() == lb.size());
 
@@ -132,15 +143,17 @@ void NLOPT_IK::cartSumSquaredError(const std::vector<double>& x, double error[])
   }
 
 
-  KDL::JntArray q(x.size());
+  KDL::JntArray q_red(x.size());
 
   for (uint i = 0; i < x.size(); i++)
-    q(i) = x[i];
+    q_red(i) = x[i];
 
-  int rc = fksolver.JntToCart(q, currentPose);
+  couplings.expand(q_red, q_full);
+
+  int rc = fksolver.JntToCart(q_full, currentPose);
 
   if (rc < 0)
-    RCLCPP_FATAL_STREAM(logger_, "KDL FKSolver is failing: " << q.data);
+    RCLCPP_FATAL_STREAM(logger_, "KDL FKSolver is failing: " << q_full.data);
 
   if (std::isnan(currentPose.p.x()))
   {
@@ -183,16 +196,17 @@ int NLOPT_IK::CartToJnt(const KDL::JntArray &q_init, const KDL::Frame &p_in, KDL
 
   bounds = _bounds;
   q_out = q_init;
-  
-  if (chain.getNrOfJoints() < 2)
+
+  if (couplings.reducedSize() < 2)
   {
     RCLCPP_ERROR_THROTTLE(logger_, system_clock, 1000.0, "NLOpt_IK can only be run for chains of length 2 or more");
     return -3;
   }
 
-  if (q_init.data.size() != types.size())
+  // A seed is a full configuration, so it is the chain that is counted here, not the search space.
+  if (q_init.data.size() != couplings.size())
   {
-    RCLCPP_ERROR_THROTTLE(logger_, system_clock, 1000.0, "IK seeded with wrong number of joints.  Expected %d but got %d", (int)types.size(), (int)q_init.data.size());
+    RCLCPP_ERROR_THROTTLE(logger_, system_clock, 1000.0, "IK seeded with wrong number of joints.  Expected %d but got %d", (int)couplings.size(), (int)q_init.data.size());
     return -3;
   }
 
@@ -203,11 +217,16 @@ int NLOPT_IK::CartToJnt(const KDL::JntArray &q_init, const KDL::Frame &p_in, KDL
 
   targetPose = p_in;
 
-  std::vector<double> x(chain.getNrOfJoints());
+  // Reduce the seed: its mimic entries are dropped here and recomputed by expand() on the way out,
+  // so a seed that does not satisfy its couplings is repaired rather than searched from.
+  KDL::JntArray q_red_init;
+  couplings.reduce(q_init, q_red_init);
+
+  std::vector<double> x(couplings.reducedSize());
 
   for (uint i = 0; i < x.size(); i++)
   {
-    x[i] = q_init(i);
+    x[i] = q_red_init(i);
 
     if (types[i] == KDL::BasicJointType::Continuous)
       continue;
@@ -310,10 +329,12 @@ int NLOPT_IK::CartToJnt(const KDL::JntArray &q_init, const KDL::Frame &p_in, KDL
   }
 
 
-  for (uint i = 0; i < x.size(); i++)
-  {
-    q_out(i) = best_x[i];
-  }
+  // Solutions leave as full configurations, with their mimic entries computed from the values the
+  // optimiser actually chose.
+  KDL::JntArray best_red(best_x.size());
+  for (uint i = 0; i < best_x.size(); i++)
+    best_red(i) = best_x[i];
+  couplings.expand(best_red, q_out);
 
   return progress;
 

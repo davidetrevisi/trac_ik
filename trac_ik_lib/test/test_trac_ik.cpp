@@ -96,6 +96,10 @@ struct Fixture
   KDL::Chain chain;
   KDL::JntArray lb, ub;
   std::vector<std::string> joint_names;
+  /// The couplings the URDF declares, ready to hand to a solver. A solve test that wants the
+  /// mechanism the fixture actually describes passes this; one that wants the chain treated as
+  /// uncoupled passes nothing, which is how the arm fixtures stay a regression on the default.
+  TRAC_IK::JointCouplings couplings;
 
   Fixture(const std::string& urdf_file, const std::string& base, const std::string& tip)
   {
@@ -128,6 +132,27 @@ struct Fixture
       ++i;
     }
     EXPECT_EQ(i, chain.getNrOfJoints());
+
+    couplings = TRAC_IK::JointCouplings(couplingDescription());
+    EXPECT_TRUE(couplings.valid()) << couplings.error();
+  }
+
+  // The description a caller hands the library, read off the same URDF this fixture parsed. This is
+  // what the plugin will build from MoveIt's robot model in ticket 06.
+  std::vector<TRAC_IK::JointCoupling> couplingDescription() const
+  {
+    std::vector<TRAC_IK::JointCoupling> out(chain.getNrOfJoints());
+    for (unsigned int i = 0; i < joint_names.size(); ++i)
+    {
+      out[i].name = joint_names[i];
+      const auto joint = model.getJoint(joint_names[i]);
+      if (!joint->mimic)
+        continue;
+      out[i].mimicked_index = indexOf(joint->mimic->joint_name);
+      out[i].multiplier = joint->mimic->multiplier;
+      out[i].offset = joint->mimic->offset;
+    }
+    return out;
   }
 
   bool unbounded(unsigned int i) const
@@ -332,9 +357,9 @@ TEST(TracIkLib, Arm6ContinuousJointsAreUnbounded)
 }
 
 // ---------------------------------------------------------------------------------------------
-// The crane: 9 chain joints, 4 of them mimic joints, 5 active. Today the library has no notion of
-// a mimic joint, so it treats all 9 as active. The coupling test below is the RED one ticket 04
-// turns green.
+// The crane: 9 chain joints, 4 of them mimic joints, 5 active. Told how its chain is coupled, the
+// solver chooses 5 values and computes the other 4, so a solution satisfies the couplings exactly
+// rather than approximately -- which is what the tests below assert, on one sample and on a set.
 // ---------------------------------------------------------------------------------------------
 
 TEST(TracIkLib, CraneChainShape)
@@ -348,10 +373,21 @@ TEST(TracIkLib, CraneChainShape)
   EXPECT_EQ(mimics, 4) << "4 of them are mimic joints";
 }
 
+// A query with the three orientation axes freed. Both coupled fixtures are asked for position with
+// orientation free, because enforcing their couplings is exactly what takes away the degrees of
+// freedom an arbitrary 6-axis pose would need: the crane is left with 5 and mimic_arm with 3. It is
+// also what the crane is asked for in service, and what ticket 09 makes its shipped default.
+TRAC_IK::Query positionOnlyQuery(TRAC_IK::SolveType type)
+{
+  TRAC_IK::Query q = defaultQuery(type);
+  q.tolerance_bounds.rot.x(std::numeric_limits<float>::max());
+  q.tolerance_bounds.rot.y(std::numeric_limits<float>::max());
+  q.tolerance_bounds.rot.z(std::numeric_limits<float>::max());
+  return q;
+}
+
 TEST(TracIkLib, CraneSolutionRespectsMimicCoupling)
 {
-  GTEST_SKIP() << "measures the mimic coupling defect; delete this skip in ticket 05";
-
   Fixture f("crane.urdf", "base_link", "jib_ext_link");
   // TRAP, pinned deliberately: Distance, not Speed. In Speed mode the KDL branch answers in ~1 ms
   // with a solution whose four parallel prismatic joints happen to be equal -- their Jacobian
@@ -361,8 +397,8 @@ TEST(TracIkLib, CraneSolutionRespectsMimicCoupling)
   // (up to 0.86 on main_boom_ext_4, measured). Crane coupling tests therefore pin Distance rather
   // than leaning on the shipped default, and no mimic work may accept a green Speed-mode run as
   // evidence.
-  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub);
-  TRAC_IK::Query q = defaultQuery(TRAC_IK::Distance);
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, f.couplings);
+  TRAC_IK::Query q = positionOnlyQuery(TRAC_IK::Distance);
 
   // A mimic-consistent full configuration, so the target is reachable under the coupling.
   std::mt19937 rng(3);
@@ -374,11 +410,156 @@ TEST(TracIkLib, CraneSolutionRespectsMimicCoupling)
   // mode. An asymmetric seed is what exposes it.
   KDL::JntArray seed = f.randomConfig(rng), sol;
   ASSERT_GE(ik.CartToJnt(seed, target, sol, q), 0) << "no solution for a reachable crane pose";
-  EXPECT_LT(positionError(target, f.fk(sol)), kPosTol) << "the 9 free joints do reach the target";
+  EXPECT_LT(positionError(target, f.fk(sol)), kPosTol) << "the 5 active joints do reach the target";
   expectWithinLimits(f, sol);
-
-  // RED until ticket 04: the solver chooses all 9 joints independently, so the coupling is broken.
   expectMimicCouplings(f, sol);
+}
+
+// Not one sample: the coupling has to hold on every solution, not on a lucky one, and the two
+// branches race, so which of them answers varies from sample to sample.
+TEST(TracIkLib, CraneSolutionsRespectMimicCouplingOverASampleSet)
+{
+  Fixture f("crane.urdf", "base_link", "jib_ext_link");
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, f.couplings);
+  TRAC_IK::Query q = positionOnlyQuery(TRAC_IK::Distance);
+
+  std::mt19937 rng(31);
+  int solved = 0;
+  for (int n = 0; n < 40; ++n)
+  {
+    const KDL::Frame target = f.fk(f.mimicConsistentConfig(rng));
+    KDL::JntArray seed = f.randomConfig(rng), sol;
+    if (ik.CartToJnt(seed, target, sol, q) < 0)
+      continue;
+    ++solved;
+    EXPECT_LT(positionError(target, f.fk(sol)), kPosTol);
+    expectWithinLimits(f, sol);
+    expectMimicCouplings(f, sol);
+  }
+  EXPECT_GE(static_cast<double>(solved) / 40, kSolveRateFloor) << "solved " << solved << " of 40";
+}
+
+// A seed is a full configuration and a caller may hand one that the mechanism cannot hold: mimic
+// entries that do not follow their mimicked joints, and a mimicked joint outside the bounds the
+// couplings leave it. Neither is an error -- the solver recomputes the mimic entries and clamps the
+// rest -- and neither may reach the solution.
+TEST(TracIkLib, ASeedOffItsCouplingIsRepairedRatherThanRefused)
+{
+  Fixture f("crane.urdf", "base_link", "jib_ext_link");
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, f.couplings);
+  TRAC_IK::Query q = positionOnlyQuery(TRAC_IK::Distance);
+
+  std::mt19937 rng(32);
+  const KDL::Frame target = f.fk(f.mimicConsistentConfig(rng));
+
+  KDL::JntArray seed = f.mimicConsistentConfig(rng), sol;
+  // Off its coupling by a lot, and one mimicked joint driven past its own upper limit.
+  for (unsigned int i = 0; i < f.joint_names.size(); ++i)
+    if (f.model.getJoint(f.joint_names[i])->mimic)
+      seed(i) = f.lb(i);
+  const int mimicked = f.indexOf("main_boom_ext");
+  ASSERT_GE(mimicked, 0);
+  seed(mimicked) = f.ub(mimicked) + 5.0;
+
+  ASSERT_GE(ik.CartToJnt(seed, target, sol, q), 0) << "a repairable seed is not a reason to fail";
+  EXPECT_LT(positionError(target, f.fk(sol)), kPosTol);
+  expectWithinLimits(f, sol);
+  expectMimicCouplings(f, sol);
+}
+
+// The same, on the fixture whose tightening actually bites: mimic_arm's j2 has a narrower effective
+// range than its own limits, so a seed inside its URDF limits can still be outside what the
+// mechanism can hold. The clamp is to the EFFECTIVE bounds, which is the only clamp that leaves the
+// mimic joint inside its own limits too.
+TEST(TracIkLib, ASeedInsideItsOwnLimitsButOutsideTheEffectiveOnesIsClamped)
+{
+  Fixture f("mimic_arm.urdf", "base_link", "tool_link");
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, f.couplings);
+  KDL::JntArray lb, ub;
+  ASSERT_TRUE(ik.getKDLLimits(lb, ub));
+
+  const int j2 = f.indexOf("j2");
+  ASSERT_GE(j2, 0);
+  ASSERT_LT(ub(j2), f.ub(j2)) << "j2's effective upper bound must be the tighter one";
+
+  TRAC_IK::Query q = positionOnlyQuery(TRAC_IK::Distance);
+
+  std::mt19937 rng(33);
+  const KDL::Frame target = f.fk(f.mimicConsistentConfig(rng));
+
+  KDL::JntArray seed = f.mimicConsistentConfig(rng), sol;
+  seed(j2) = (ub(j2) + f.ub(j2)) / 2.0;  // inside the URDF's limits, outside the effective ones
+
+  ASSERT_GE(ik.CartToJnt(seed, target, sol, q), 0);
+  EXPECT_LT(positionError(target, f.fk(sol)), kPosTol);
+  expectWithinLimits(f, sol);
+  expectMimicCouplings(f, sol);
+  for (unsigned int i = 0; i < f.chain.getNrOfJoints(); ++i)
+  {
+    EXPECT_GE(sol(i), lb(i) - 1e-6) << f.joint_names[i] << " below its effective lower bound";
+    EXPECT_LE(sol(i), ub(i) + 1e-6) << f.joint_names[i] << " above its effective upper bound";
+  }
+}
+
+TEST(TracIkLib, MimicArmSolutionRespectsMimicCoupling)
+{
+  Fixture f("mimic_arm.urdf", "base_link", "tool_link");
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, f.couplings);
+  TRAC_IK::Query q = positionOnlyQuery(TRAC_IK::Distance);
+
+  std::mt19937 rng(34);
+  int solved = 0;
+  for (int n = 0; n < 40; ++n)
+  {
+    const KDL::Frame target = f.fk(f.mimicConsistentConfig(rng));
+    KDL::JntArray seed = f.randomConfig(rng), sol;
+    if (ik.CartToJnt(seed, target, sol, q) < 0)
+      continue;
+    ++solved;
+    EXPECT_LT(positionError(target, f.fk(sol)), kPosTol);
+    expectWithinLimits(f, sol);
+    // A negative multiplier and a nonzero offset: the crane cannot catch a sign error here.
+    expectMimicCouplings(f, sol);
+  }
+  EXPECT_GE(static_cast<double>(solved) / 40, kSolveRateFloor) << "solved " << solved << " of 40";
+}
+
+// Distance ranks by joint distance from the seed, and joint distance is measured over the joints the
+// solver chose. Counting a mimic entry too would weight the crane's four-stage telescope x4 against
+// its one-stage jib, so the winner would not be the closest configuration in any sense a caller
+// means.
+TEST(TracIkLib, DistanceRanksTheReducedConfiguration)
+{
+  Fixture f("crane.urdf", "base_link", "jib_ext_link");
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, f.couplings);
+  TRAC_IK::Query q = positionOnlyQuery(TRAC_IK::Distance);
+
+  const auto reducedSqDistance = [&f](const KDL::JntArray& a, const KDL::JntArray& b) {
+    double sum = 0;
+    for (const unsigned int i : f.couplings.activeIndices())
+      sum += (a(i) - b(i)) * (a(i) - b(i));
+    return sum;
+  };
+
+  std::mt19937 rng(35);
+  const KDL::Frame target = f.fk(f.mimicConsistentConfig(rng));
+  // A seed that already satisfies the couplings, so the key is measured from what the caller passed.
+  KDL::JntArray seed = f.mimicConsistentConfig(rng), sol;
+  ASSERT_GE(ik.CartToJnt(seed, target, sol, q), 0);
+
+  std::vector<KDL::JntArray> candidates;
+  std::vector<std::pair<double, uint> > keys;
+  ASSERT_TRUE(ik.getSolutions(candidates, keys));
+  ASSERT_FALSE(keys.empty());
+
+  // The ordering key IS the reduced squared distance -- on a coupled chain the full sum is a
+  // different number, so this equality is what tells the two apart.
+  for (const auto& key : keys)
+    EXPECT_NEAR(key.first, reducedSqDistance(seed, candidates[key.second]), 1e-9);
+
+  // ...and the returned solution is the closest of them under that measure.
+  for (const auto& candidate : candidates)
+    EXPECT_LE(reducedSqDistance(seed, sol), reducedSqDistance(seed, candidate) + 1e-9);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -596,7 +777,7 @@ TEST(TracIkLib, MimicArmChainShape)
 TEST(TracIkLib, MimicArmPositionOnlyRoundTrip)
 {
   Fixture f("mimic_arm.urdf", "base_link", "tool_link");
-  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub);
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, f.couplings);
   TRAC_IK::Query q = defaultQuery();
 
   // Three active joints against a three-dimensional position goal: orientation is left free, so the
@@ -624,30 +805,18 @@ TEST(TracIkLib, MimicArmPositionOnlyRoundTrip)
 // ---------------------------------------------------------------------------------------------
 // Joint couplings and effective bounds (ticket 04). The value type owns expand, reduce, tighten and
 // the reduced Jacobian; the solver is told how its chain is coupled at construction and answers
-// honestly about what range each joint can actually take. The solver does not yet SEARCH in reduced
-// space -- that is ticket 05 -- so nothing here asserts a solution satisfies a coupling.
+// honestly about what range each joint can actually take. These are tests of the value and of the
+// bounds it produces; that a SOLUTION satisfies a coupling is asserted with the solves above.
 // ---------------------------------------------------------------------------------------------
 
 namespace
 {
 
-// The description a caller hands the library, built from the same URDF the fixture parsed. This is
-// what the plugin will build from MoveIt's robot model in ticket 06; here it comes from the model
-// the Fixture already has.
+// The fixture's own description, under the name the tests below already use. Spelling it out is
+// what lets each refusal test corrupt one field of a description that is otherwise well-formed.
 std::vector<TRAC_IK::JointCoupling> couplingsOf(const Fixture& f)
 {
-  std::vector<TRAC_IK::JointCoupling> out(f.chain.getNrOfJoints());
-  for (unsigned int i = 0; i < f.joint_names.size(); ++i)
-  {
-    out[i].name = f.joint_names[i];
-    const auto joint = f.model.getJoint(f.joint_names[i]);
-    if (!joint->mimic)
-      continue;
-    out[i].mimicked_index = f.indexOf(joint->mimic->joint_name);
-    out[i].multiplier = joint->mimic->multiplier;
-    out[i].offset = joint->mimic->offset;
-  }
-  return out;
+  return f.couplingDescription();
 }
 
 // The two coupled fixtures, each named by one mimic joint and the joint it follows. The refusals
