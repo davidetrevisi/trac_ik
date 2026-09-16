@@ -30,6 +30,7 @@ OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <trac_ik/kdl_tl.hpp>
 #include <cfloat>
+#include <cmath>
 
 namespace KDL
 {
@@ -103,15 +104,20 @@ void ChainIkSolverPos_TL::reducedVelocityStep(const Eigen::MatrixXd& jacobian, c
     return;
   }
 
-  // KDL's own cutoff. A coupled chain is where it earns its keep: the crane's four parallel
-  // telescope stages are a rank deficiency in the full Jacobian, and folding them is what removes
-  // it, so what is left to truncate is a genuine singularity rather than a coupling.
+  // Truncation by magnitude, like KDL's, but at a tenth of its cutoff: ChainIkSolverVel_pinv
+  // defaults to eps = 1e-5, and the smaller one is measurably better here. On the crane 1e-5 drops
+  // the Newton branch from 100.0% of 1000 samples to 99.1% and its mean from 56 us to 827, because
+  // the samples it stops converging on spend the whole budget; on arm6 the two are identical and on
+  // arm7 1e-6 is slightly ahead. The direction a tenth of a micron of singular value points in is
+  // still a direction this chain can move, and on a folded Jacobian it is a real one -- the crane's
+  // four parallel telescope stages, the rank deficiency that would otherwise dominate the spectrum,
+  // are gone from it by construction.
   const double tol = 1e-6;
   // V * S^-1 * U^T * v, in two products through the smaller vector rather than one expression that
   // builds a matrix per iteration.
   svd_rhs.noalias() = svd_u.transpose() * v;
   for (int i = 0; i < svd_s.size(); i++)
-    svd_rhs(i) = (svd_s(i) < tol) ? 0.0 : svd_rhs(i) / svd_s(i);
+    svd_rhs(i) = (std::fabs(svd_s(i)) < tol) ? 0.0 : svd_rhs(i) / svd_s(i);
 
   qdot.noalias() = svd_v * svd_rhs;
 }

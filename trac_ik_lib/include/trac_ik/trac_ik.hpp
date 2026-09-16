@@ -276,6 +276,20 @@ private:
   /// failure convention: no exceptions, and never a solver that answers as if nothing were wrong.
   void failInitialization(const std::string& why);
 
+  /**
+   * Whether shifting each joint by a whole revolution leaves the tip where it is.
+   *
+   * A revolution is a symmetry of a rotational joint, but not necessarily of the MECHANISM: shift a
+   * mimicked joint by 2*pi and each joint following it moves by multiplier * 2*pi, which is a
+   * revolution only when the multiplier is a whole number and the mimic joint is rotational too. A
+   * joint that fails the test is left where the solver put it rather than normalised, since the
+   * normalisation would return a configuration that no longer reaches the goal.
+   *
+   * Every joint of an uncoupled chain shares its revolutions, so nothing changes for one.
+   */
+  std::vector<bool> shares_revolutions;
+  void classifyRevolutions();
+
   /// Decide, for these bounds, which rotational joints are continuous. The test is the one both
   /// inner solvers apply to the bounds they are built with, so all three agree on every joint.
   void classifyJoints(const KDL::JntArray& q_min, const KDL::JntArray& q_max);

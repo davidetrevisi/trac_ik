@@ -33,6 +33,7 @@ OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <Eigen/Geometry>
 #include <rclcpp/rclcpp.hpp>
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <string>
 
@@ -100,6 +101,22 @@ void TRAC_IK::classifyJoints(const KDL::JntArray& q_min, const KDL::JntArray& q_
   }
 }
 
+void TRAC_IK::classifyRevolutions()
+{
+  shares_revolutions.assign(chain.getNrOfJoints(), true);
+  for (uint i = 0; i < chain.getNrOfJoints(); ++i)
+  {
+    if (!couplings.isMimic(i))
+      continue;
+    const JointCoupling& c = couplings.coupling(i);
+    // A whole-number multiplier onto a joint of the same kind carries a revolution to a revolution;
+    // a half of one, or a prismatic joint driven by a rotational one, carries it to a real motion.
+    const bool whole = std::abs(c.multiplier - std::round(c.multiplier)) <= 1e-12;
+    if (!whole || kinds[i] != kinds[c.mimicked_index])
+      shares_revolutions[c.mimicked_index] = false;
+  }
+}
+
 void TRAC_IK::initialize()
 {
 
@@ -155,6 +172,8 @@ void TRAC_IK::initialize()
   mechanism.q_max = ub;
   configureSolvers(mechanism);
   classifyJoints(lb, ub);
+  // Fixed by the mechanism, so it is decided once rather than per call.
+  classifyRevolutions();
 
   initialized = true;
 }
@@ -331,6 +350,12 @@ void TRAC_IK::normalize_seed(const KDL::JntArray& seed, KDL::JntArray& solution,
     if (types[i] == KDL::BasicJointType::TransJoint)
       continue;
 
+    // Shifting this one by a revolution would move the tip, because something follows it that does
+    // not turn by a revolution when it does. Better a solution far from the seed than one that no
+    // longer reaches the goal.
+    if (!shares_revolutions[i])
+      continue;
+
     double target = seed(i);
     double val = solution(i);
 
@@ -360,6 +385,10 @@ void TRAC_IK::normalize_limits(const KDL::JntArray& seed, KDL::JntArray& solutio
   {
 
     if (types[i] == KDL::BasicJointType::TransJoint)
+      continue;
+
+    // As in normalize_seed: a revolution of this joint is not a revolution of the mechanism.
+    if (!shares_revolutions[i])
       continue;
 
     double target = seed(i);
@@ -444,6 +473,16 @@ int TRAC_IK::CartToJnt(const KDL::JntArray &q_init, const KDL::Frame &p_in, KDL:
     return -1;
   }
 
+  // A seed is a full configuration, and everything below indexes it by chain joint -- the repair
+  // first of all. Checked here rather than left to the inner solvers, which would each read past it
+  // before reporting the size they wanted.
+  if (q_init.rows() != chain.getNrOfJoints())
+  {
+    RCLCPP_ERROR(logger, "IK seeded with wrong number of joints.  Expected %d but got %d",
+                 (int)chain.getNrOfJoints(), (int)q_init.rows());
+    return -1;
+  }
+
   // Empty per-call bounds mean the mechanism's own; a non-empty pair must fit the chain.
   const bool per_call_bounds = query.q_min.data.size() != 0 || query.q_max.data.size() != 0;
   if (per_call_bounds &&
@@ -493,7 +532,12 @@ int TRAC_IK::CartToJnt(const KDL::JntArray &q_init, const KDL::Frame &p_in, KDL:
 
   // cref, not a copy: the query lives on this stack frame and both threads are joined below.
   task1 = std::thread(&TRAC_IK::runKDL, this, std::cref(resolved), seed, p_in);
-  task2 = std::thread(&TRAC_IK::runNLOPT, this, std::cref(resolved), seed, p_in);
+  // NLopt needs two variables to optimise, which a mechanism with one active joint does not have --
+  // a two-joint chain where one joint follows the other is exactly that, and is a mechanism this
+  // library supports. Starting the branch anyway would spin its retry loop against a solver that
+  // refuses at once, burning a core for the whole timeout while the Newton branch does the work.
+  if (couplings.reducedSize() >= 2)
+    task2 = std::thread(&TRAC_IK::runNLOPT, this, std::cref(resolved), seed, p_in);
 
   if (task1.joinable())
       task1.join();

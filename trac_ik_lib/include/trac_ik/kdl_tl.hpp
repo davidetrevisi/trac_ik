@@ -113,8 +113,8 @@ private:
   Eigen::VectorXd svd_s, svd_tmp, svd_rhs;
 
   /**
-   * The velocity step, over the reduced Jacobian: a truncated SVD pseudo-inverse, at KDL's own 1e-6
-   * cutoff. KDL has no coupled velocity solver and MoveIt's ChainIkSolverVelMimicSVD ships no
+   * The velocity step, over the reduced Jacobian: a truncated SVD pseudo-inverse, at a tenth of
+   * KDL's cutoff (see the measurement at the truncation itself). KDL has no coupled velocity solver and MoveIt's ChainIkSolverVelMimicSVD ships no
    * exported link target, so this is ours; on an uncoupled chain it is a plain pseudo-inverse, and
    * measured faster than the KDL::ChainIkSolverVel_pinv it replaces on arm6, arm7 and the crane.
    */

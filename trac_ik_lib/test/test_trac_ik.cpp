@@ -562,6 +562,113 @@ TEST(TracIkLib, DistanceRanksTheReducedConfiguration)
     EXPECT_LE(reducedSqDistance(seed, sol), reducedSqDistance(seed, candidate) + 1e-9);
 }
 
+// A revolution of a joint is a symmetry of that joint, but not necessarily of the mechanism. Both
+// normalisation passes shift a rotational solution by whole revolutions to bring it near the seed;
+// if a mimic joint follows the shifted joint at a fraction of its motion, that shift turns the mimic
+// joint by a fraction of a revolution and the tip moves. arm6 declares no couplings, so the
+// mechanism here is synthetic: a continuous j4 following a continuous j1 at HALF its angle, which
+// is the smallest shape that has the property. Without the guard the returned configuration still
+// satisfies the coupling -- and no longer reaches the goal.
+TEST(TracIkLib, ARevolutionOfAMimickedJointIsNotAlwaysARevolutionOfTheMechanism)
+{
+  Fixture f("arm6.urdf", "base_link", "tool_link");
+  std::vector<TRAC_IK::JointCoupling> description = f.couplingDescription();
+  const int mimicked = f.indexOf("j1"), mimic = f.indexOf("j4");
+  ASSERT_GE(mimicked, 0);
+  ASSERT_GE(mimic, 0);
+  ASSERT_TRUE(f.unbounded(mimicked)) << "j1 must be continuous for the shift to be allowed at all";
+  ASSERT_TRUE(f.unbounded(mimic)) << "and j4 too, or tightening would bound j1 and forbid the shift";
+  description[mimic].mimicked_index = mimicked;
+  description[mimic].multiplier = 0.5;
+
+  const TRAC_IK::JointCouplings couplings(description);
+  ASSERT_TRUE(couplings.valid()) << couplings.error();
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, couplings);
+  ASSERT_TRUE(ik.isInitialized()) << ik.initializationError();
+
+  // Position only: five active joints against three constraints, so the query stays well posed.
+  TRAC_IK::Query q = positionOnlyQuery(TRAC_IK::Distance);
+
+  const auto consistent = [&](std::mt19937& rng) {
+    KDL::JntArray full = f.randomConfig(rng), reduced;
+    couplings.reduce(full, reduced);
+    couplings.expand(reduced, full);
+    return full;
+  };
+
+  std::mt19937 rng(36);
+  int solved = 0;
+  for (int n = 0; n < 40; ++n)
+  {
+    const KDL::Frame target = f.fk(consistent(rng));
+    KDL::JntArray seed = consistent(rng), sol;
+    if (ik.CartToJnt(seed, target, sol, q) < 0)
+      continue;
+    ++solved;
+    EXPECT_NEAR(sol(mimic), 0.5 * sol(mimicked), 1e-6) << "j4 must follow j1";
+    EXPECT_LT(positionError(target, f.fk(sol)), kPosTol)
+        << "the returned configuration must still reach the goal after normalisation";
+  }
+  EXPECT_GT(solved, 0) << "the synthetic mechanism must solve at all";
+}
+
+// A seed is indexed by chain joint from the moment it arrives -- the repair reads it before either
+// solver does -- so a short one is refused rather than read past.
+TEST(TracIkLib, ASeedOfTheWrongSizeIsRefused)
+{
+  Fixture f("crane.urdf", "base_link", "jib_ext_link");
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, f.couplings);
+  ASSERT_TRUE(ik.isInitialized());
+
+  KDL::JntArray sol;
+  for (const unsigned int rows : { 0u, f.chain.getNrOfJoints() - 1, f.chain.getNrOfJoints() + 1 })
+  {
+    KDL::JntArray seed(rows);
+    EXPECT_EQ(ik.CartToJnt(seed, KDL::Frame::Identity(), sol, positionOnlyQuery(TRAC_IK::Speed)), -1)
+        << "a seed of " << rows << " entries is not a configuration of a 9-joint chain";
+  }
+}
+
+// One active joint is a mechanism, not a malformed one: a two-joint chain whose second joint follows
+// its first is the shape, and mimic_arm reduced this far stands in for it. NLopt cannot optimise a
+// single variable and says so, which must leave the Newton branch to answer rather than leave its
+// retry loop spinning against a solver that refuses instantly.
+TEST(TracIkLib, AMechanismWithOneActiveJointIsStillServed)
+{
+  Fixture f("mimic_arm.urdf", "base_link", "tool_link");
+  std::vector<TRAC_IK::JointCoupling> description = f.couplingDescription();
+  const int j2 = f.indexOf("j2");
+  ASSERT_GE(j2, 0);
+  for (const char* name : { "j1", "j4" })
+  {
+    const int i = f.indexOf(name);
+    ASSERT_GE(i, 0);
+    description[i].mimicked_index = j2;
+    description[i].multiplier = 1.0;
+    description[i].offset = 0.0;
+  }
+
+  const TRAC_IK::JointCouplings couplings(description);
+  ASSERT_TRUE(couplings.valid()) << couplings.error();
+  ASSERT_EQ(couplings.reducedSize(), 1u) << "j2 alone is chosen; the other three follow it";
+
+  TRAC_IK::TRAC_IK ik(f.chain, f.lb, f.ub, couplings);
+  ASSERT_TRUE(ik.isInitialized()) << ik.initializationError();
+
+  // Seeded AT the answer, because one variable cannot generally reach a three-dimensional goal: what
+  // is under test is that the solve is served and returns, not that one joint can go anywhere.
+  KDL::JntArray reduced(1), seed;
+  reduced(0) = 0.3;
+  couplings.expand(reduced, seed);
+  const KDL::Frame target = f.fk(seed);
+
+  KDL::JntArray sol;
+  ASSERT_GE(ik.CartToJnt(seed, target, sol, positionOnlyQuery(TRAC_IK::Speed)), 0);
+  EXPECT_LT(positionError(target, f.fk(sol)), kPosTol);
+  for (const char* name : { "j1", "j4" })
+    EXPECT_NEAR(sol(f.indexOf(name)), sol(j2), 1e-6) << name << " must follow j2";
+}
+
 // ---------------------------------------------------------------------------------------------
 // The query (ticket 03). Timeout, epsilon, solve type, tolerance bounds and the per-call joint
 // bounds are a parameter of CartToJnt, not solver state, so one instance answers many questions.
