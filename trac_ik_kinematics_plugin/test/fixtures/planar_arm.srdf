@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<!-- FIXTURE (implementation ticket 06). Companion SRDF for planar_arm.urdf. -->
+<robot name="planar_arm">
+  <group name="arm">
+    <chain base_link="base_link" tip_link="tool_link"/>
+  </group>
+</robot>

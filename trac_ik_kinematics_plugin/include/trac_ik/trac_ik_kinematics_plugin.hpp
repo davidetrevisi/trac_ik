@@ -35,6 +35,9 @@ OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <moveit/robot_model/robot_model.hpp>
 #include <kdl/chain.hpp>
 #include <kdl/jntarray.hpp>
+#include <trac_ik/joint_coupling.hpp>
+#include <string>
+#include <vector>
 
 // Forward declaration
 namespace trac_ik_kinematics {
@@ -48,6 +51,9 @@ namespace trac_ik_kinematics_plugin
 class TRAC_IKKinematicsPlugin : public kinematics::KinematicsBase
 {
 public:
+  /// The solver joint list: every chain joint with a variable, mimic joints included, in KDL chain
+  /// order. MoveIt binds it by name and is free to order its own group differently, so chain order
+  /// costs nothing and means index `i` denotes the same joint on both sides of this seam.
   const std::vector<std::string>& getJointNames() const
   {
     return joint_names_;
@@ -187,6 +193,15 @@ private:
 
   int getKDLSegmentIndex(const std::string &name) const;
 
+  /// Read the chain's couplings off the robot model and validate them once. False -- with a FATAL
+  /// line naming the joint -- for a robot this plugin cannot answer for correctly.
+  bool buildCouplings(const moveit::core::RobotModel& robot_model, const std::string& group_name);
+
+  /// Fold the bounds of every mimic joint that sits outside the chain, and inside the group, into
+  /// the bounds of the chain joint that drives it. Only this plugin can see such a joint.
+  bool foldOutOfChainMimicBounds(const moveit::core::RobotModel& robot_model,
+                                 const moveit::core::JointModelGroup& group);
+
   std::vector<std::string> joint_names_;
   std::vector<std::string> link_names_;
 
@@ -196,7 +211,16 @@ private:
   KDL::Chain chain;
   bool position_ik_;
 
+  /// The bounds handed to every solver instance: the joints' own, already tightened for any mimic
+  /// joint that sits OUTSIDE the chain (only this plugin can see one). The couplings inside the
+  /// chain are the library's to fold, at construction.
   KDL::JntArray joint_min, joint_max;
+
+  /// How the chain's joints are coupled, one entry per chain joint, read off MoveIt's robot model
+  /// at initialize. Deliberately the plain description and not a JointCouplings: the plugin owns no
+  /// mapping logic and no second copy of solver state -- it builds a JointCouplings to validate this
+  /// once at load, and hands a fresh one to each solver instance.
+  std::vector<TRAC_IK::JointCoupling> couplings_;
 
   std::string solve_type;
 

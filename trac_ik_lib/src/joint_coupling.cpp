@@ -85,6 +85,15 @@ std::pair<double, double> ordered(double a, double b)
   return a <= b ? std::make_pair(a, b) : std::make_pair(b, a);
 }
 
+// What a mimic joint's own interval [lo, hi] says about the joint it follows: the preimage under
+// `multiplier * x + offset`, ends back in order. Both tighteners map an interval this way -- the one
+// inside the chain and the one outside it -- and this is the formula they share. A zero multiplier
+// has no preimage and is each caller's own case, since what a pin means differs between them.
+std::pair<double, double> preimage(double multiplier, double offset, double lo, double hi)
+{
+  return ordered((lo - offset) / multiplier, (hi - offset) / multiplier);
+}
+
 }  // namespace
 
 JointCouplings::JointCouplings(unsigned int chain_joints)
@@ -254,8 +263,7 @@ bool JointCouplings::tighten(KDL::JntArray& lb, KDL::JntArray& ub, std::string& 
       continue;
     }
 
-    const std::pair<double, double> back = ordered((lo[i] - c.offset) / c.multiplier,
-                                                   (hi[i] - c.offset) / c.multiplier);
+    const std::pair<double, double> back = preimage(c.multiplier, c.offset, lo[i], hi[i]);
     lo[m] = std::max(lo[m], back.first);
     hi[m] = std::min(hi[m], back.second);
   }
@@ -306,6 +314,44 @@ void JointCouplings::foldJacobian(const KDL::Jacobian& jac, Eigen::MatrixXd& red
     const double scale = isMimic(i) ? couplings_[i].multiplier : 1.0;
     reduced.col(reduced_index_[i]) += scale * jac.data.col(i);
   }
+}
+
+bool tightenThroughCoupling(double multiplier, double offset, double mimic_lb, double mimic_ub,
+                            double& lb, double& ub, std::string& why)
+{
+  if (!std::isfinite(multiplier) || !std::isfinite(offset))
+  {
+    why = "has a non-finite multiplier or offset";
+    return false;
+  }
+
+  const double mimic_lo = asBound(mimic_lb);
+  const double mimic_hi = asBound(mimic_ub);
+
+  if (multiplier == 0.0)
+  {
+    // Pinned at the offset, exactly as in tighten: it constrains the joint it follows not at all,
+    // but the pin must be a value it can hold.
+    if (offset < mimic_lo - kBoundTol || offset > mimic_hi + kBoundTol)
+    {
+      why = "is pinned at " + std::to_string(offset) + ", outside its own bounds";
+      return false;
+    }
+    return true;
+  }
+
+  const std::pair<double, double> back = preimage(multiplier, offset, mimic_lo, mimic_hi);
+  const double lo = std::max(asBound(lb), back.first);
+  const double hi = std::min(asBound(ub), back.second);
+  if (lo > hi)
+  {
+    why = "leaves the joint it follows no value that both their bounds allow";
+    return false;
+  }
+
+  lb = asStored(lo);
+  ub = asStored(hi);
+  return true;
 }
 
 }  // namespace TRAC_IK

@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<!-- FIXTURE (implementation ticket 06). The crane's group written the plausible way a user writes
+     it: the <chain> tag alone. A chain includes only the joints along it, and turret_rotation's
+     parent link (base_link) is outside turret_link -> jib_ext_link, so the group is missing the
+     first joint of the chain MoveIt then asks this plugin to solve (base_frame is the root link,
+     not the SRDF chain base -- see BaseFrameIsTheRootLinkNotTheSrdfChainBase).
+
+     MoveIt's own answer to that mismatch is to drop the kinematics solver with one log line naming
+     nothing. The plugin refuses to load and names the joint instead. -->
+<robot name="spx532_2_model">
+  <group name="main_boom_jib">
+    <chain base_link="turret_link" tip_link="jib_ext_link"/>
+  </group>
+</robot>

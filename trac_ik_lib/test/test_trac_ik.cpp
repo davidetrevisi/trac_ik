@@ -1403,3 +1403,91 @@ TEST(TracIkLibCouplings, PerCallJointBoundsWithNoSatisfiableConfigurationAreRefu
   ASSERT_TRUE(ik.getKDLLimits(lb, ub));
   EXPECT_NEAR(ub(f.indexOf("j2")), 1.0, 1e-12);
 }
+
+// ---------------------------------------------------------------------------------------------
+// tightenThroughCoupling: the one coupling the chain cannot see. JointCouplings::tighten folds
+// every coupling inside the chain; a chain joint can also drive a joint the chain never reaches,
+// and only a caller that sees the whole robot -- the MoveIt plugin (implementation ticket 06) --
+// can find one. Same mapping, one joint at a time, so the sign rule and the unbounded spelling
+// stay in one file.
+// ---------------------------------------------------------------------------------------------
+
+TEST(TracIkLibCouplings, TightenThroughCouplingMapsSignAware)
+{
+  // A mimic joint at -0.5 with a +0.3 offset, limited to [-0.2, 0.8], as mimic_arm's j3 is: the
+  // preimage is [-1.0, 1.0] and the ends swap on the way, which is the whole point of the sign
+  // handling. The joint's own [-1.5, 1.5] is intersected with it, not replaced by it.
+  double lb = -1.5, ub = 1.5;
+  std::string why;
+  ASSERT_TRUE(TRAC_IK::tightenThroughCoupling(-0.5, 0.3, -0.2, 0.8, lb, ub, why)) << why;
+  EXPECT_NEAR(lb, -1.0, 1e-12);
+  EXPECT_NEAR(ub, 1.0, 1e-12);
+
+  // Already narrower than the coupling asks for: an intersection never widens.
+  lb = -0.4;
+  ub = 0.4;
+  ASSERT_TRUE(TRAC_IK::tightenThroughCoupling(-0.5, 0.3, -0.2, 0.8, lb, ub, why)) << why;
+  EXPECT_NEAR(lb, -0.4, 1e-12);
+  EXPECT_NEAR(ub, 0.4, 1e-12);
+}
+
+TEST(TracIkLibCouplings, TightenThroughCouplingHandlesUnboundedEnds)
+{
+  // An unbounded mimic joint bounds nothing, whichever spelling the caller uses for "unbounded": an
+  // infinity, or the stored sentinel. Mapping a sentinel as though it were a finite number is how
+  // a multiplier of 2 would quietly bound an unbounded joint at 8.5e37.
+  const double inf = std::numeric_limits<double>::infinity();
+  double lb = -1.0, ub = 1.0;
+  std::string why;
+  ASSERT_TRUE(TRAC_IK::tightenThroughCoupling(2.0, 0.0, -inf, inf, lb, ub, why)) << why;
+  EXPECT_NEAR(lb, -1.0, 1e-12);
+  EXPECT_NEAR(ub, 1.0, 1e-12);
+
+  ASSERT_TRUE(TRAC_IK::tightenThroughCoupling(2.0, 0.0, std::numeric_limits<float>::lowest(),
+                                     std::numeric_limits<float>::max(), lb, ub, why)) << why;
+  EXPECT_NEAR(lb, -1.0, 1e-12);
+  EXPECT_NEAR(ub, 1.0, 1e-12);
+
+  // ...and an unbounded joint narrowed by a bounded mimic joint comes back bounded, which is what
+  // stops random restarts sampling outside the reachable interval.
+  lb = std::numeric_limits<float>::lowest();
+  ub = std::numeric_limits<float>::max();
+  ASSERT_TRUE(TRAC_IK::tightenThroughCoupling(2.0, 1.0, -1.0, 3.0, lb, ub, why)) << why;
+  EXPECT_NEAR(lb, -1.0, 1e-12);
+  EXPECT_NEAR(ub, 1.0, 1e-12);
+}
+
+TEST(TracIkLibCouplings, TightenThroughCouplingTreatsAZeroMultiplierAsAPin)
+{
+  // <mimic multiplier="0" offset="0.05"/> is well-formed URDF meaning "pinned at 0.05". It says
+  // nothing about the joint it follows...
+  double lb = -1.0, ub = 1.0;
+  std::string why;
+  ASSERT_TRUE(TRAC_IK::tightenThroughCoupling(0.0, 0.05, -0.2, 0.8, lb, ub, why)) << why;
+  EXPECT_NEAR(lb, -1.0, 1e-12);
+  EXPECT_NEAR(ub, 1.0, 1e-12);
+
+  // ...but the pin has to be a value the pinned joint can hold, or no configuration satisfies the
+  // mechanism and there is nothing to solve.
+  EXPECT_FALSE(TRAC_IK::tightenThroughCoupling(0.0, 1.5, -0.2, 0.8, lb, ub, why));
+  EXPECT_NE(why.find("pinned"), std::string::npos) << why;
+}
+
+TEST(TracIkLibCouplings, TightenThroughCouplingRefusesWhatNoConfigurationSatisfies)
+{
+  std::string why;
+  // The mimic joint's bounds map onto [2, 3], which the joint's own [-1, 1] does not reach.
+  double lb = -1.0, ub = 1.0;
+  EXPECT_FALSE(TRAC_IK::tightenThroughCoupling(1.0, 0.0, 2.0, 3.0, lb, ub, why));
+  EXPECT_FALSE(why.empty());
+  // Refused rather than answered, and the bounds are left as they were.
+  EXPECT_NEAR(lb, -1.0, 1e-12);
+  EXPECT_NEAR(ub, 1.0, 1e-12);
+
+  for (const double bad : { std::numeric_limits<double>::infinity(),
+                            std::numeric_limits<double>::quiet_NaN() })
+  {
+    EXPECT_FALSE(TRAC_IK::tightenThroughCoupling(bad, 0.0, -1.0, 1.0, lb, ub, why));
+    EXPECT_FALSE(TRAC_IK::tightenThroughCoupling(1.0, bad, -1.0, 1.0, lb, ub, why));
+  }
+}

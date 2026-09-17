@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<!-- FIXTURE (implementation ticket 06). Companion SRDF for mimic_arm_branch.urdf. The group is the
+     chain base_link -> tool_link plus j5, which the chain does not reach: a <chain> tag includes
+     only the joints along it, so the extra joint has to be named. That combination -- in the group,
+     outside the chain -- is the one the plugin alone can see and must fold into the bounds. -->
+<robot name="mimic_arm_branch">
+  <group name="arm">
+    <chain base_link="base_link" tip_link="tool_link"/>
+    <joint name="j5"/>
+  </group>
+</robot>

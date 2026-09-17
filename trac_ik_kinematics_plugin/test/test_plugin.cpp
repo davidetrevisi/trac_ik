@@ -169,6 +169,57 @@ std::vector<double> randomGroupConfig(const moveit::core::RobotModelPtr& model, 
   return q;
 }
 
+// Apply a solution the way MoveIt does: by name, over the solver joint list. Setting a mimicked
+// joint re-imposes every coupling that follows it, including one on a joint outside the chain, which
+// the solver never saw and the caller never named.
+moveit::core::RobotState applySolution(const moveit::core::RobotModelPtr& model,
+                                       const std::vector<std::string>& names,
+                                       const std::vector<double>& solution)
+{
+  moveit::core::RobotState state(model);
+  state.setToDefaultValues();
+  for (size_t i = 0; i < names.size(); ++i)
+    state.setVariablePosition(names[i], solution[i]);
+  state.update();
+  return state;
+}
+
+// A group configuration restricted to the solver joint list: the shape of the seed MoveIt hands the
+// plugin. The two differ whenever the group holds a joint the chain does not reach.
+std::vector<double> seedFromGroupConfig(const moveit::core::RobotModelPtr& model, const std::string& group,
+                                        const std::vector<double>& group_config,
+                                        const std::vector<std::string>& names)
+{
+  moveit::core::RobotState state(model);
+  state.setToDefaultValues();
+  state.setJointGroupPositions(group, group_config);
+  state.update();
+  std::vector<double> out;
+  out.reserve(names.size());
+  for (const auto& name : names)
+    out.push_back(state.getVariablePosition(name));
+  return out;
+}
+
+// Every coupling among the solver joint list's joints, checked against the returned configuration:
+// MoveIt's overwrite must be a no-op rather than a silent correction.
+void expectCouplingsSatisfied(const moveit::core::RobotModelPtr& model,
+                              const std::vector<std::string>& names,
+                              const std::vector<double>& solution)
+{
+  for (size_t i = 0; i < names.size(); ++i)
+  {
+    const auto* jm = model->getJointModel(names[i]);
+    const auto* mimicked = jm->getMimic();
+    if (!mimicked)
+      continue;
+    const auto it = std::find(names.begin(), names.end(), mimicked->getName());
+    ASSERT_NE(it, names.end()) << "mimicked joint outside the solver joint list";
+    const double expected = jm->getMimicFactor() * solution[std::distance(names.begin(), it)] + jm->getMimicOffset();
+    EXPECT_NEAR(solution[i], expected, 1e-6) << names[i] << " must follow " << mimicked->getName();
+  }
+}
+
 struct CraneCase
 {
   static constexpr const char* kGroup = "main_boom_jib";
@@ -198,14 +249,13 @@ TEST(TracIkPlugin, SolverJointListIsEveryChainJointWithVariables)
 }
 
 // ---------------------------------------------------------------------------------------------
-// The measured baseline (ticket 01): a full-pose query from a zero seed returns SUCCESS, yet once
-// MoveIt re-imposes the mimic coupling the pose is 0.090 m off. RED until tickets 04 and 05.
+// The measured baseline (ticket 01): a full-pose query from a zero seed reported SUCCESS and landed
+// 0.090 m away once MoveIt re-imposed the mimic coupling. Green since ticket 06 wired the couplings
+// through to the solver, which is what makes this fork usable on the crane.
 // ---------------------------------------------------------------------------------------------
 
 TEST(TracIkPlugin, CraneSolutionSurvivesMimicReimposition)
 {
-  GTEST_SKIP() << "measures the mimic coupling defect; delete this skip in ticket 06";
-
   auto model = loadModel("crane.urdf", "crane.srdf");
   auto node = makeNode(CraneCase::kGroup, {rclcpp::Parameter("solve_type", "Distance")});
   trac_ik_kinematics_plugin::TRAC_IKKinematicsPlugin plugin;
@@ -231,8 +281,6 @@ TEST(TracIkPlugin, CraneSolutionSurvivesMimicReimposition)
 
 TEST(TracIkPlugin, CraneSolutionRespectsMimicCoupling)
 {
-  GTEST_SKIP() << "measures the mimic coupling defect; delete this skip in ticket 06";
-
   auto model = loadModel("crane.urdf", "crane.srdf");
   // TRAP, pinned deliberately: solve_type Distance, not the shipped default. In Speed mode the KDL
   // branch answers in ~1 ms with a solution whose four parallel prismatic joints happen to come out
@@ -256,20 +304,9 @@ TEST(TracIkPlugin, CraneSolutionRespectsMimicCoupling)
   moveit_msgs::msg::MoveItErrorCodes err;
   ASSERT_TRUE(plugin.searchPositionIK(toPose(target), seed, solveBudget(), solution, err));
 
-  // RED until ticket 04: the returned full configuration must already satisfy the coupling, so that
-  // MoveIt's overwrite is a no-op rather than a silent correction.
-  const auto& names = plugin.getJointNames();
-  for (size_t i = 0; i < names.size(); ++i)
-  {
-    const auto* jm = model->getJointModel(names[i]);
-    const auto* mimicked = jm->getMimic();
-    if (!mimicked)
-      continue;
-    const auto it = std::find(names.begin(), names.end(), mimicked->getName());
-    ASSERT_NE(it, names.end()) << "mimicked joint outside the solver joint list";
-    const double expected = jm->getMimicFactor() * solution[std::distance(names.begin(), it)] + jm->getMimicOffset();
-    EXPECT_NEAR(solution[i], expected, 1e-6) << names[i] << " must follow " << mimicked->getName();
-  }
+  // The returned full configuration must already satisfy the coupling, so that MoveIt's overwrite is
+  // a no-op rather than a silent correction.
+  expectCouplingsSatisfied(model, plugin.getJointNames(), solution);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -473,12 +510,10 @@ TEST(TracIkPlugin, MimicArmPositionOnlyQueriesAreAnswered)
   trac_ik_kinematics_plugin::TRAC_IKKinematicsPlugin plugin;
   ASSERT_TRUE(plugin.initialize(node, *model, "arm", "base_link", {"tool_link"}, 0.005));
 
-  // Reachable targets, so the floor measures the solver and not the fixture. What is NOT asserted
-  // here is the pose the caller gets: the solver treats j3 as free, MoveIt overwrites it on the way
-  // back, and the position lands up to 0.18 m off (measured on the VM, 2026-09-15) -- the same
-  // defect the crane tests measure, on a negative multiplier. Three tests measure it and are
-  // skipped; this one stays green and pins the query shape, and ticket 05 adds the pose assertion
-  // to it when the coupling is enforced.
+  // Reachable targets, so the floor measures the solver and not the fixture. The pose assertion is
+  // the point: before ticket 06 the solver chose j3 for itself, MoveIt overwrote it on the way back,
+  // and the position landed up to 0.18 m off (measured on the VM, 2026-09-15) -- the crane defect on
+  // a negative multiplier. Only position is checked, because orientation is freed by the query.
   std::mt19937 rng(12);
   int solved = 0;
   for (int n = 0; n < kSamples; ++n)
@@ -496,6 +531,9 @@ TEST(TracIkPlugin, MimicArmPositionOnlyQueriesAreAnswered)
     }
     ++solved;
     ASSERT_EQ(solution.size(), 4u);
+    const Eigen::Isometry3d reached = fk(model, "arm", solution, "tool_link", "base_link");
+    EXPECT_LT(positionError(target, reached), kPosTol)
+        << "the position after MoveIt re-imposes j3's coupling";
     // err is deliberately not asserted on the success path: today the plugin returns true without
     // touching error_code when no validity callback is given, so the caller reads whatever it
     // passed in. Measured here, 2026-09-15; ticket 11 owns the per-call error codes and is where
@@ -503,4 +541,233 @@ TEST(TracIkPlugin, MimicArmPositionOnlyQueriesAreAnswered)
   }
   EXPECT_GE(static_cast<double>(solved) / kSamples, kSolveRateFloor)
       << "solved " << solved << " of " << kSamples;
+}
+
+// ---------------------------------------------------------------------------------------------
+// What initialisation refuses (implementation ticket 06). The couplings are read off MoveIt's robot
+// model and validated once at load, so a robot this fork cannot answer for correctly fails to load
+// with the joint named, instead of returning -1 from every call or being dropped by MoveIt silently.
+//
+// The other refusals -- a mimicked joint outside the chain, a variable count other than one, a
+// non-finite multiplier -- are the JointCouplings value's, and the library suite exercises them
+// there: each needs a contrived robot description, and the plugin's own path to them is the same
+// throwaway value.
+// ---------------------------------------------------------------------------------------------
+
+TEST(TracIkPlugin, InitializeRejectsAChainJointOutsideTheGroup)
+{
+  auto model = loadModel("crane.urdf", "crane_group_missing_joint.srdf");
+  const auto* jmg = model->getJointModelGroup(CraneCase::kGroup);
+  ASSERT_NE(jmg, nullptr);
+  ASSERT_FALSE(jmg->hasJointModel("turret_rotation")) << "the fixture's whole point";
+
+  auto node = makeNode(CraneCase::kGroup, {rclcpp::Parameter("solve_type", "Distance")});
+  trac_ik_kinematics_plugin::TRAC_IKKinematicsPlugin plugin;
+  EXPECT_FALSE(plugin.initialize(node, *model, CraneCase::kGroup, CraneCase::kBase, {CraneCase::kTip}, 0.005))
+      << "a chain joint the group does not list has nowhere for a seed to come from; MoveIt's own"
+         " answer is to drop the solver with one line naming nothing";
+}
+
+TEST(TracIkPlugin, InitializeRejectsAChainJointWithMoreThanOneVariable)
+{
+  auto model = loadModel("planar_arm.urdf", "planar_arm.srdf");
+  const auto* j2 = model->getJointModel("j2");
+  ASSERT_NE(j2, nullptr);
+  ASSERT_EQ(j2->getVariableCount(), 3u) << "MoveIt gives a planar joint three variables";
+
+  auto node = makeNode("arm");
+  trac_ik_kinematics_plugin::TRAC_IKKinematicsPlugin plugin;
+  EXPECT_FALSE(plugin.initialize(node, *model, "arm", "base_link", {"tool_link"}, 0.005))
+      << "kdl_parser turned j2 into a fixed joint, so a chain index and a configuration entry no"
+         " longer denote the same joint; a solver joint list longer than the configuration is how a"
+         " kinematics plugin corrupts memory in a release build";
+}
+
+// ---------------------------------------------------------------------------------------------
+// The SRDF's passive_joint marking means nothing here (wayfinder ticket 05, answer 11): it marks
+// "not actuated", a different property from "value determined by another joint". The crane's four
+// entries coincide with its four mimic joints and nothing may depend on that coincidence.
+// ---------------------------------------------------------------------------------------------
+
+TEST(TracIkPlugin, PassiveJointMarkingChangesNothing)
+{
+  auto marked = loadModel("crane.urdf", "crane.srdf");
+  auto plain = loadModel("crane.urdf", "crane_no_passive.srdf");
+
+  auto marked_node = makeNode(CraneCase::kGroup, {rclcpp::Parameter("solve_type", "Distance")});
+  trac_ik_kinematics_plugin::TRAC_IKKinematicsPlugin from_marked;
+  ASSERT_TRUE(from_marked.initialize(marked_node, *marked, CraneCase::kGroup, CraneCase::kBase,
+                                     {CraneCase::kTip}, 0.005));
+
+  auto plain_node = makeNode(CraneCase::kGroup, {rclcpp::Parameter("solve_type", "Distance")});
+  trac_ik_kinematics_plugin::TRAC_IKKinematicsPlugin from_plain;
+  ASSERT_TRUE(from_plain.initialize(plain_node, *plain, CraneCase::kGroup, CraneCase::kBase,
+                                    {CraneCase::kTip}, 0.005));
+
+  // The two models really do differ in the one property under test -- crane_no_passive.srdf is
+  // crane.srdf with its four <passive_joint> lines removed and nothing else -- and they agree on
+  // every mimic relation regardless, because MoveIt derives those from the URDF's <mimic> tags.
+  ASSERT_EQ(marked->getSRDF()->getPassiveJoints().size(), 4u);
+  ASSERT_TRUE(plain->getSRDF()->getPassiveJoints().empty());
+  for (const char* name : { "main_boom_ext_2", "main_boom_ext_3", "main_boom_ext_4", "jib_ext_2" })
+  {
+    const auto* marked_mimicked = marked->getJointModel(name)->getMimic();
+    const auto* plain_mimicked = plain->getJointModel(name)->getMimic();
+    ASSERT_NE(marked_mimicked, nullptr);
+    ASSERT_NE(plain_mimicked, nullptr) << name << " is a mimic joint whether or not it is marked passive";
+    EXPECT_EQ(marked_mimicked->getName(), plain_mimicked->getName());
+    EXPECT_EQ(marked->getJointModel(name)->getMimicFactor(), plain->getJointModel(name)->getMimicFactor());
+  }
+
+  EXPECT_EQ(from_marked.getJointNames(), from_plain.getJointNames());
+
+  // And the couplings still bind: same query as CraneSolutionRespectsMimicCoupling, on the model
+  // whose SRDF says nothing about passive joints.
+  const std::vector<double> S = {0.3, 0.7, 0.5, 0.5, 0.5, 0.5, -0.5, 0.4, 0.4};
+  const Eigen::Isometry3d target = fk(plain, CraneCase::kGroup, S, CraneCase::kTip, CraneCase::kBase);
+  const std::vector<double> seed = {0.1, 0.2, 0.05, 0.4, 0.15, 0.3, -0.2, 0.1, 0.35};
+  std::vector<double> solution;
+  moveit_msgs::msg::MoveItErrorCodes err;
+  ASSERT_TRUE(from_plain.searchPositionIK(toPose(target), seed, solveBudget(), solution, err));
+  expectCouplingsSatisfied(plain, from_plain.getJointNames(), solution);
+  const Eigen::Isometry3d reached = fk(plain, CraneCase::kGroup, solution, CraneCase::kTip, CraneCase::kBase);
+  EXPECT_LT(positionError(target, reached), kPosTol);
+  EXPECT_LT(rotationError(target, reached), kRotTol);
+}
+
+// ---------------------------------------------------------------------------------------------
+// mimic_arm_branch (implementation ticket 06): j5 mimics j2 from OUTSIDE the chain, inside the
+// group. The library is handed a chain that does not contain j5 and cannot know it exists, so the
+// plugin is what must fold j5's bounds into j2's before the solver ever runs. Without it the solve
+// succeeds, MoveIt re-imposes the coupling, j5 lands outside its own bounds, and the planner rejects
+// the state downstream with nothing in the IK return code to explain why.
+// ---------------------------------------------------------------------------------------------
+
+TEST(TracIkPlugin, OutOfChainMimicJointBoundsAreFolded)
+{
+  auto model = loadModel("mimic_arm_branch.urdf", "mimic_arm_branch.srdf");
+  // Position-only, as on mimic_arm: three active joints cannot also serve an orientation goal.
+  auto node = makeNode("arm", {rclcpp::Parameter("position_only_ik", true)});
+  trac_ik_kinematics_plugin::TRAC_IKKinematicsPlugin plugin;
+  ASSERT_TRUE(plugin.initialize(node, *model, "arm", "base_link", {"tool_link"}, 0.005));
+
+  const std::vector<std::string> expected = {"j1", "j2", "j3", "j4"};
+  EXPECT_EQ(plugin.getJointNames(), expected) << "j5 is in the group but not in the chain";
+  const auto* j5 = model->getJointModel("j5");
+  ASSERT_NE(j5, nullptr);
+
+  // Poses the mechanism cannot hold, and the half of this test that bites. Each is forward
+  // kinematics of a configuration whose j2 lies outside the +/-0.2 that j5 can follow: a pose, but
+  // not one available to this robot. The honest answers are therefore "no solution" or "a solution
+  // whose j5 is in bounds". What the plugin must never do -- and did before the folding -- is
+  // report SUCCESS having driven j5 outside its own bounds, because MoveIt writes j5 from j2 afterwards
+  // and the planner then rejects the state with nothing in the IK return code to explain it
+  // (measured on the VM, 2026-09-17: j2 = 0.900 against j5's own bounds of +/-0.200).
+  for (const double j2 : {0.9, -0.9, 0.5, -0.5})
+  {
+    const std::vector<double> reach = {0.2, j2, -0.5 * j2 + 0.3, -0.3, j2};
+    const Eigen::Isometry3d target = fk(model, "arm", reach, "tool_link", "base_link");
+    const std::vector<double> seed = {0.0, 0.0, 0.3, 0.0};
+
+    std::vector<double> solution;
+    moveit_msgs::msg::MoveItErrorCodes err;
+    if (!plugin.searchPositionIK(toPose(target), seed, solveBudget(), solution, err))
+    {
+      // The expected outcome once the bounds are folded, and a fine one: the pose is not available
+      // to this mechanism. What this half of the test forbids is the other answer, and it is
+      // deliberately one-sided -- with the folding in place there is usually nothing here to check,
+      // and without it every one of these four targets came back SUCCESS with j5 out of bounds.
+      EXPECT_EQ(err.val, moveit_msgs::msg::MoveItErrorCodes::NO_IK_SOLUTION);
+      continue;
+    }
+    const moveit::core::RobotState state = applySolution(model, plugin.getJointNames(), solution);
+    EXPECT_TRUE(state.satisfiesBounds(j5))
+        << "j2 = " << j2 << " asked for: solved with j2 = " << solution[1] << ", so j5 = "
+        << state.getVariablePosition("j5") << ", outside the bounds of a joint the chain drives"
+        << " and the library cannot see";
+  }
+
+  // And the regression half: targets the mechanism CAN hold are still answered, and answered
+  // correctly, once the bounds have been narrowed.
+  std::mt19937 rng(21);
+  int solved = 0;
+  for (int n = 0; n < kSamples; ++n)
+  {
+    // Sampled through the group with per-joint bound rejection, so j5 -- and therefore j2 -- is in
+    // range by construction and every target is one a correct solver can reach.
+    const auto q = randomGroupConfig(model, "arm", rng);
+    const Eigen::Isometry3d target = fk(model, "arm", q, "tool_link", "base_link");
+    const auto seed = seedFromGroupConfig(model, "arm", randomGroupConfig(model, "arm", rng),
+                                          plugin.getJointNames());
+
+    std::vector<double> solution;
+    moveit_msgs::msg::MoveItErrorCodes err;
+    if (!plugin.searchPositionIK(toPose(target), seed, solveBudget(), solution, err))
+      continue;
+    ++solved;
+    ASSERT_EQ(solution.size(), 4u);
+
+    const moveit::core::RobotState state = applySolution(model, plugin.getJointNames(), solution);
+    EXPECT_TRUE(state.satisfiesBounds(j5))
+        << "j5 = " << state.getVariablePosition("j5") << " from j2 = " << solution[1];
+    const Eigen::Isometry3d reached =
+        state.getGlobalLinkTransform("base_link").inverse() * state.getGlobalLinkTransform("tool_link");
+    EXPECT_LT(positionError(target, reached), kPosTol);
+  }
+  EXPECT_GE(static_cast<double>(solved) / kSamples, kSolveRateFloor)
+      << "solved " << solved << " of " << kSamples;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The two paths that take a configuration FROM the caller. Forward kinematics is the one plugin
+// path with no library call under it, so it is the one place the plugin repairs anything; a seed
+// goes to the library untouched, because the library repairs it for every caller it has.
+// ---------------------------------------------------------------------------------------------
+
+TEST(TracIkPlugin, GetPositionFkRecomputesMimicEntries)
+{
+  auto model = loadModel("mimic_arm.urdf", "mimic_arm.srdf");
+  auto node = makeNode("arm");
+  trac_ik_kinematics_plugin::TRAC_IKKinematicsPlugin plugin;
+  ASSERT_TRUE(plugin.initialize(node, *model, "arm", "base_link", {"tool_link"}, 0.005));
+
+  // j3 is deliberately inconsistent: it follows j2 at -0.5 with a +0.3 offset, so 0.8 asks for
+  // -0.1 and the configuration as given is not one this robot can hold. MoveIt promises nothing
+  // about those entries, and the pose of a configuration that violates the robot's own couplings is
+  // not a pose the robot has.
+  const std::vector<double> given = {0.2, 0.8, 0.0, -0.3};
+  std::vector<geometry_msgs::msg::Pose> poses;
+  ASSERT_TRUE(plugin.getPositionFK({"tool_link"}, given, poses));
+  ASSERT_EQ(poses.size(), 1u);
+  Eigen::Isometry3d plugin_fk;
+  tf2::fromMsg(poses[0], plugin_fk);
+
+  // RobotState re-imposes the coupling, which is exactly the repair being asserted: the two agree
+  // only if the plugin recomputed j3 rather than believing the 0.0 it was handed.
+  const Eigen::Isometry3d oracle = fk(model, "arm", given, "tool_link", "base_link");
+  EXPECT_LT(positionError(oracle, plugin_fk), 1e-9);
+  EXPECT_LT(rotationError(oracle, plugin_fk), 1e-9);
+}
+
+TEST(TracIkPlugin, AnInconsistentSeedIsTheLibrarysToRepair)
+{
+  auto model = loadModel("mimic_arm.urdf", "mimic_arm.srdf");
+  auto node = makeNode("arm", {rclcpp::Parameter("position_only_ik", true)});
+  trac_ik_kinematics_plugin::TRAC_IKKinematicsPlugin plugin;
+  ASSERT_TRUE(plugin.initialize(node, *model, "arm", "base_link", {"tool_link"}, 0.005));
+
+  const std::vector<double> target_config = {0.3, 0.4, 0.1, -0.2};
+  const Eigen::Isometry3d target = fk(model, "arm", target_config, "tool_link", "base_link");
+
+  // The seed's j3 does not follow its j2, which is what a caller who leaves mimic entries alone
+  // sends. The plugin passes it through as it stands -- the library recomputes mimic entries and
+  // clamps an out-of-bounds mimicked joint for every caller it has, and two repairs would be two
+  // places to keep in step -- so what is asserted here is the answer, not the seed.
+  const std::vector<double> seed = {0.0, 0.5, 0.0, 0.0};
+  std::vector<double> solution;
+  moveit_msgs::msg::MoveItErrorCodes err;
+  ASSERT_TRUE(plugin.searchPositionIK(toPose(target), seed, solveBudget(), solution, err));
+  expectCouplingsSatisfied(model, plugin.getJointNames(), solution);
+  const Eigen::Isometry3d reached = fk(model, "arm", solution, "tool_link", "base_link");
+  EXPECT_LT(positionError(target, reached), kPosTol);
 }

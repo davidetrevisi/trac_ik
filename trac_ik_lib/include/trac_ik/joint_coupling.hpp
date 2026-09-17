@@ -194,6 +194,24 @@ private:
   std::string error_;
 };
 
+/**
+ * Tighten one joint's bounds by a coupling attached to a joint that is NOT in the chain, in place.
+ *
+ * JointCouplings::tighten folds every coupling the chain can see. A chain joint can also drive a
+ * joint the chain never reaches, and only a caller that sees the whole robot -- the MoveIt plugin --
+ * can find those; this is the same sign-aware mapping for that one joint at a time -- literally the
+ * same, since both tighteners share the preimage this file computes -- so a negative multiplier, a
+ * pinned joint and the unbounded spelling are decided here and nowhere else.
+ *
+ * [lb, ub] is intersected with the preimage of [mimic_lb, mimic_ub] under `multiplier * x + offset`.
+ * An unbounded end is an infinity on the way in and the stored sentinel on the way out.
+ *
+ * False, with `why` completing a sentence about the mimic joint, for a non-finite coupling, a zero
+ * multiplier that pins the mimic joint outside its own bounds, or an empty intersection.
+ */
+bool tightenThroughCoupling(double multiplier, double offset, double mimic_lb, double mimic_ub,
+                            double& lb, double& ub, std::string& why);
+
 }  // namespace TRAC_IK
 
 #endif
